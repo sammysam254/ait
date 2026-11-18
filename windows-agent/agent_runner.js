@@ -80,13 +80,13 @@ console.log('[Agent] Cloud Controller Host:', config.backendUrl);
 console.log('[Agent] Enrolled Agent ID   :', config.agentId || 'Waiting for enrollment...');
 console.log('[Agent] Organization ID     :', config.organizationId);
 
-// Locate Scrcpy executable
+// Locate Scrcpy executable and server jar
 function findScrcpy() {
   const candidates = [
-    path.join(agentDir, 'scrcpy', 'scrcpy.exe'),
     path.join(__dirname, 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
     path.join(__dirname, '..', 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
     path.join(process.cwd(), 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
+    path.join(agentDir, 'scrcpy', 'scrcpy.exe'),
     'scrcpy.exe',
   ];
 
@@ -96,16 +96,32 @@ function findScrcpy() {
   return null;
 }
 
+function findScrcpyServerJar() {
+  const candidates = [
+    path.join(__dirname, 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy-server'),
+    path.join(__dirname, '..', 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy-server'),
+    path.join(process.cwd(), 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy-server'),
+    path.join(agentDir, 'scrcpy', 'scrcpy-server'),
+  ];
+
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
 const scrcpyPath = findScrcpy();
+const scrcpyServerJarPath = findScrcpyServerJar();
 console.log('[Agent] Scrcpy Executable    :', scrcpyPath || 'Not found');
+console.log('[Agent] Scrcpy Server Jar    :', scrcpyServerJarPath || 'Not found');
 
 // Locate ADB
 function findAdb() {
   const candidates = [
-    path.join(agentDir, 'scrcpy', 'adb.exe'),
     path.join(__dirname, 'resources', 'scrcpy-win64-v3.3.4', 'adb.exe'),
     path.join(__dirname, '..', 'resources', 'scrcpy-win64-v3.3.4', 'adb.exe'),
     path.join(process.cwd(), 'resources', 'scrcpy-win64-v3.3.4', 'adb.exe'),
+    path.join(agentDir, 'scrcpy', 'adb.exe'),
     'adb.exe',
   ];
 
@@ -136,8 +152,10 @@ function captureScreenshot(serial) {
   });
 }
 
-// Persistent interactive ADB shell per device for 0ms instantaneous control response
+// Persistent interactive ADB shell and native scrcpy control sockets
 const shellSessions = new Map(); // serial -> ChildProcess
+const controlSockets = new Map(); // serial -> net.Socket
+const deviceDimensions = new Map(); // serial -> { width, height }
 
 function getDeviceShell(serial) {
   let proc = shellSessions.get(serial);
@@ -160,6 +178,54 @@ function sendShellInput(serial, command) {
   }
 }
 
+function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
+  try {
+    // 32-byte SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT (type = 2)
+    const msg = Buffer.alloc(32);
+    msg.writeUInt8(2, 0); // type: INJECT_TOUCH_EVENT
+    msg.writeUInt8(action, 1); // 0=DOWN, 1=UP, 2=MOVE
+    msg.writeUInt32BE(0, 2); // pointerId high 32 = 0
+    msg.writeUInt32BE(0, 6); // pointerId low 32 = 0 (primary finger pointer)
+    msg.writeUInt32BE(Math.max(0, Math.min(width, Math.round(x))), 10);
+    msg.writeUInt32BE(Math.max(0, Math.min(height, Math.round(y))), 14);
+    msg.writeUInt16BE(width, 18);
+    msg.writeUInt16BE(height, 20);
+    msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
+    msg.writeUInt32BE(action === 1 ? 0 : 1, 24); // action_button: AMOTION_EVENT_BUTTON_PRIMARY
+    msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons_state
+    sock.write(msg);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function sendScrcpyKeycode(sock, keycode) {
+  try {
+    // 14-byte SC_CONTROL_MSG_TYPE_INJECT_KEYCODE (type = 0)
+    // DOWN
+    const down = Buffer.alloc(14);
+    down.writeUInt8(0, 0);
+    down.writeUInt8(0, 1); // AKEY_EVENT_ACTION_DOWN
+    down.writeUInt32BE(keycode, 2);
+    down.writeUInt32BE(0, 6);
+    down.writeUInt32BE(0, 10);
+    sock.write(down);
+
+    // UP
+    const up = Buffer.alloc(14);
+    up.writeUInt8(0, 0);
+    up.writeUInt8(1, 1); // AKEY_EVENT_ACTION_UP
+    up.writeUInt32BE(keycode, 2);
+    up.writeUInt32BE(0, 6);
+    up.writeUInt32BE(0, 10);
+    sock.write(up);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function wakePhone(serial) {
   try {
     sendShellInput(serial, 'input keyevent 224'); // KEYCODE_WAKEUP
@@ -168,45 +234,76 @@ async function wakePhone(serial) {
 
 async function injectInput(serial, action, data) {
   try {
+    const sock = controlSockets.get(serial);
+    const dims = deviceDimensions.get(serial) || { width: 720, height: 1600 };
+
+    if (sock && !sock.destroyed) {
+      switch (action) {
+        case 'touch_down':
+          sendScrcpyTouch(sock, 0, data.x, data.y, dims.width, dims.height);
+          return true;
+        case 'touch_move':
+          sendScrcpyTouch(sock, 2, data.x, data.y, dims.width, dims.height);
+          return true;
+        case 'touch_up':
+          sendScrcpyTouch(sock, 1, data.x, data.y, dims.width, dims.height);
+          return true;
+        case 'tap':
+          sendScrcpyTouch(sock, 0, data.x, data.y, dims.width, dims.height);
+          setTimeout(() => {
+            if (controlSockets.has(serial)) {
+              sendScrcpyTouch(controlSockets.get(serial), 1, data.x, data.y, dims.width, dims.height);
+            }
+          }, 40);
+          return true;
+        case 'back':
+          sendScrcpyKeycode(sock, 4); // AKEYCODE_BACK
+          return true;
+        case 'home':
+          sendScrcpyKeycode(sock, 3); // AKEYCODE_HOME
+          return true;
+        case 'recents':
+          sendScrcpyKeycode(sock, 187); // AKEYCODE_APP_SWITCH
+          return true;
+      }
+    }
+
+    // Fallback via high-speed interactive shell
     switch (action) {
       case 'tap': {
         const x = Math.round(data.x);
         const y = Math.round(data.y);
-        console.log(`[Input] 👉 Instant Tap (${x}, ${y}) on ${serial}`);
         sendShellInput(serial, `input tap ${x} ${y}`);
         return true;
       }
+      case 'touch_down':
+      case 'touch_move':
+      case 'touch_up':
+        return true;
       case 'swipe': {
         const { startX, startY, endX, endY, durationMs } = data;
         const dur = Math.max(100, Math.round(durationMs || 150));
-        console.log(`[Input] 👆 Smooth Swipe (${Math.round(startX)}, ${Math.round(startY)}) -> (${Math.round(endX)}, ${Math.round(endY)}) [${dur}ms] on ${serial}`);
         sendShellInput(serial, `input swipe ${Math.round(startX)} ${Math.round(startY)} ${Math.round(endX)} ${Math.round(endY)} ${dur}`);
         return true;
       }
       case 'back':
-        console.log(`[Input] ◀️ Key: BACK on ${serial}`);
         sendShellInput(serial, 'input keyevent 4');
         return true;
       case 'home':
-        console.log(`[Input] 🔘 Key: HOME on ${serial}`);
         sendShellInput(serial, 'input keyevent 3');
         return true;
       case 'recents':
-        console.log(`[Input] ⏹️ Key: RECENTS on ${serial}`);
         sendShellInput(serial, 'input keyevent 187');
         return true;
       case 'rotate':
         const r = data && data.orientation === 'landscape' ? '1' : '0';
-        console.log(`[Input] 🔄 Rotate: ${data && data.orientation === 'landscape' ? 'Landscape' : 'Portrait'} on ${serial}`);
         sendShellInput(serial, `settings put system user_rotation ${r}`);
         return true;
       case 'text':
-        console.log(`[Input] ⌨️ Text: "${data.text}" on ${serial}`);
         const escaped = (data.text || '').replace(/([^\w])/g, '\\$1');
         sendShellInput(serial, `input text ${escaped}`);
         return true;
       case 'key_event':
-        console.log(`[Input] 🔘 Keycode: ${data.keyCode} on ${serial}`);
         sendShellInput(serial, `input keyevent ${data.keyCode}`);
         return true;
     }
@@ -298,6 +395,19 @@ async function handleMessage(msg) {
       break;
     }
 
+    case 'request-keyframe': {
+      const { deviceId, serial } = msg;
+      const targetSerial = serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || '';
+      const cSock = controlSockets.get(targetSerial);
+      if (cSock && !cSock.destroyed) {
+        try {
+          cSock.write(Buffer.from([17])); // SC_CONTROL_MSG_TYPE_RESET_VIDEO = 17
+          console.log(`[StreamBridge] ⚡ Fresh keyframe requested (RESET_VIDEO) for ${targetSerial}`);
+        } catch (e) {}
+      }
+      break;
+    }
+
     case 'idle-stream': {
       const { deviceId } = msg;
       console.log(`[StreamBridge] ⏸️ Received idle-stream request for device: ${deviceId}`);
@@ -330,170 +440,214 @@ function startStream(deviceId, targetSerial) {
 
   const deviceIdBuf = Buffer.from(deviceId, 'utf8');
 
-  // If capture pipeline is already running for this physical device serial, push cached keyframe and reuse
+  // If capture pipeline is already running for this physical device serial, request fresh keyframe and reuse
   if (activeStreams.has(serial)) {
-    const cached = cachedKeyframes.get(serial);
-    if (cached && ws && ws.readyState === 1) {
-      console.log(`[StreamBridge] ⚡ Immediate sync: pushing cached keyframe to viewer for ${serial}`);
-      ws.send(Buffer.concat([deviceIdBuf, cached]));
+    const cSock = controlSockets.get(serial);
+    if (cSock && !cSock.destroyed) {
+      try {
+        cSock.write(Buffer.from([17])); // SC_CONTROL_MSG_TYPE_RESET_VIDEO = 17
+        console.log(`[StreamBridge] ⚡ Stream active; requested fresh live keyframe (RESET_VIDEO) for ${serial}`);
+      } catch (e) {}
+    } else {
+      const cached = cachedKeyframes.get(serial);
+      if (cached && ws && ws.readyState === 1) {
+        ws.send(Buffer.concat([deviceIdBuf, cached]));
+      }
     }
     return;
   }
 
-  console.log(`[StreamBridge] 🚀 Starting clean 60 FPS hardware stream for ${deviceId} (${serial})...`);
+  console.log(`[StreamBridge] 🚀 Launching pure 60 FPS hardware scrcpy stream for ${deviceId} (${serial})...`);
   wakePhone(serial);
 
   let active = true;
-  let screenrecordProc = null;
-  let audioProc = null;
+  let scrcpyProc = null;
+  let server = null;
+  let videoSock = null;
+  let audioSock = null;
+  let controlSock = null;
   let framesSent = 0;
   let lastStatsTime = Date.now();
-  let nalBuffer = Buffer.alloc(0);
-  let currentSps = null;
-  let currentPps = null;
+  let cachedConfig = null;
 
-  const startH264Pipeline = () => {
-    if (!active) return;
+  (async () => {
     try {
-      nalBuffer = Buffer.alloc(0);
-      screenrecordProc = spawn(adbPath, [
-        '-s', serial,
-        'exec-out',
-        'screenrecord',
-        '--output-format=h264',
-        '--size', '720x1600',
-        '--bit-rate', '8000000',
-        '--time-limit', '0',
-        '-'
-      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+      // 1. Ensure scrcpy-server.jar is pushed to phone
+      if (scrcpyServerJarPath) {
+        await execAdb(['-s', serial, 'push', scrcpyServerJarPath, '/data/local/tmp/scrcpy-server.jar']);
+      }
 
-      screenrecordProc.stdout.on('data', (chunk) => {
-        if (!active || !ws || ws.readyState !== 1) return;
+      // 2. Create local reverse TCP server on ephemeral port (avoids Win 10013 port conflicts)
+      const scid = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+      server = net.createServer();
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const port = server.address().port;
 
-        nalBuffer = Buffer.concat([nalBuffer, chunk]);
+      // 3. Set up ADB reverse tunnel
+      await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${scid}`, `tcp:${port}`]);
 
-        // Find Annex B start codes: 00 00 00 01 (4 bytes) or 00 00 01 (3 bytes)
-        const startOffsets = [];
-        for (let i = 0; i <= nalBuffer.length - 4; i++) {
-          if (nalBuffer[i] === 0x00 && nalBuffer[i + 1] === 0x00) {
-            if (nalBuffer[i + 2] === 0x01) {
-              startOffsets.push(i);
-            } else if (nalBuffer[i + 2] === 0x00 && nalBuffer[i + 3] === 0x01) {
-              startOffsets.push(i);
-              i++;
-            }
-          }
+      // 4. Accept the 3 scrcpy sockets (Video -> Audio -> Control)
+      server.on('connection', (sock) => {
+        if (!active) {
+          sock.destroy();
+          return;
         }
 
-        // When we have at least 2 boundaries, slice and emit complete NAL units
-        if (startOffsets.length >= 2) {
-          for (let k = 0; k < startOffsets.length - 1; k++) {
-            const start = startOffsets[k];
-            const end = startOffsets[k + 1];
-            const completeNal = nalBuffer.subarray(start, end);
-
-            // Check NAL type
-            const nalType = (completeNal[2] === 0x01 ? completeNal[3] : completeNal[4]) & 0x1f;
-
-            if (nalType === 7) {
-              currentSps = completeNal;
-            } else if (nalType === 8) {
-              currentPps = completeNal;
-            } else if (nalType === 5) {
-              // IDR Keyframe: Combine SPS + PPS + IDR into a single atomic keyframe
-              let fullKeyframe = completeNal;
-              if (currentSps && currentPps) {
-                fullKeyframe = Buffer.concat([currentSps, currentPps, completeNal]);
-              }
-              cachedKeyframes.set(serial, fullKeyframe);
-
-              const devIds = serialToDeviceIds.get(serial);
-              if (devIds) {
-                for (const dId of devIds) {
-                  ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), fullKeyframe]));
-                }
-              }
-              framesSent++;
-            } else {
-              // Delta frame (P-frame slice or other NAL)
-              const devIds = serialToDeviceIds.get(serial);
-              if (devIds) {
-                for (const dId of devIds) {
-                  ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), completeNal]));
-                }
-              }
-              framesSent++;
-            }
-          }
-          nalBuffer = nalBuffer.subarray(startOffsets[startOffsets.length - 1]);
-
-          const now = Date.now();
-          if (now - lastStatsTime >= 3000) {
-            const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
-            console.log(`[Stream] ⚡ ws-scrcpy clean 60 FPS hardware stream: ~${fps} FPS | ${serial}`);
-            framesSent = 0;
-            lastStatsTime = now;
-          }
+        if (!videoSock) {
+          videoSock = sock;
+          setupVideoSocket(sock);
+        } else if (!audioSock) {
+          audioSock = sock;
+          setupAudioSocket(sock);
+        } else if (!controlSock) {
+          controlSock = sock;
+          controlSockets.set(serial, sock);
+          console.log(`[StreamBridge] 🎮 Native Scrcpy Control channel active for ${serial}`);
         }
       });
 
-      screenrecordProc.on('exit', () => {
+      function setupVideoSocket(sock) {
+        let buf = Buffer.alloc(0);
+        let parsedHeader = false;
+
+        sock.on('data', (chunk) => {
+          if (!active || !ws || ws.readyState !== 1) return;
+          buf = Buffer.concat([buf, chunk]);
+
+          if (!parsedHeader && buf.length >= 76) {
+            const deviceName = buf.subarray(0, 64).toString('utf8').replace(/\0/g, '');
+            const codec = buf.subarray(64, 68).toString('utf8');
+            const width = buf.readUInt32BE(68);
+            const height = buf.readUInt32BE(72);
+            deviceDimensions.set(serial, { width, height });
+            console.log(`[StreamBridge] 📱 Scrcpy Video Ready: ${deviceName} [${width}x${height}, ${codec}]`);
+            buf = buf.subarray(76);
+            parsedHeader = true;
+          }
+
+          if (parsedHeader) {
+            while (buf.length >= 12) {
+              const rawHeader = buf.readBigUInt64BE(0);
+              const size = buf.readUInt32BE(8);
+
+              if (buf.length < 12 + size) {
+                break; // Wait for full frame
+              }
+
+              const isConfig = (rawHeader & 0x8000000000000000n) !== 0n;
+              const isKeyframe = (rawHeader & 0x4000000000000000n) !== 0n;
+              const packetData = buf.subarray(12, 12 + size);
+              buf = buf.subarray(12 + size);
+
+              if (isConfig) {
+                cachedConfig = packetData;
+              } else if (isKeyframe) {
+                const fullKeyframe = cachedConfig ? Buffer.concat([cachedConfig, packetData]) : packetData;
+                cachedKeyframes.set(serial, fullKeyframe);
+
+                const devIds = serialToDeviceIds.get(serial);
+                if (devIds) {
+                  for (const dId of devIds) {
+                    ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), fullKeyframe]));
+                  }
+                }
+                framesSent++;
+              } else {
+                // Complete delta frame
+                const devIds = serialToDeviceIds.get(serial);
+                if (devIds) {
+                  for (const dId of devIds) {
+                    ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), packetData]));
+                  }
+                }
+                framesSent++;
+              }
+
+              const now = Date.now();
+              if (now - lastStatsTime >= 3000) {
+                const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
+                console.log(`[Stream] ⚡ scrcpy pure 60 FPS hardware stream: ~${fps} FPS | ${serial}`);
+                framesSent = 0;
+                lastStatsTime = now;
+              }
+            }
+          }
+        });
+
+        sock.on('error', () => {});
+        sock.on('close', () => {
+          if (active) setTimeout(() => startStream(deviceId, serial), 1000);
+        });
+      }
+
+      function setupAudioSocket(sock) {
+        let readStatus = false;
+        sock.on('data', (chunk) => {
+          if (!active || !ws || ws.readyState !== 1) return;
+          let payload = chunk;
+          if (!readStatus && payload.length >= 4) {
+            payload = payload.subarray(4);
+            readStatus = true;
+          }
+          if (payload.length > 0) {
+            const devIds = serialToDeviceIds.get(serial);
+            if (devIds) {
+              for (const dId of devIds) {
+                ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), Buffer.from('AUD:'), payload]));
+              }
+            }
+          }
+        });
+        sock.on('error', () => {});
+      }
+
+      // 5. Spawn scrcpy-server with 1-second keyframe interval
+      scrcpyProc = spawn(adbPath, [
+        '-s', serial,
+        'shell',
+        'CLASSPATH=/data/local/tmp/scrcpy-server.jar',
+        'app_process', '/', 'com.genymobile.scrcpy.Server',
+        '3.3.4',
+        `scid=${scid}`,
+        'log_level=info',
+        'cleanup=false',
+        'max_size=1600',
+        'video_bit_rate=8000000',
+        'audio=true',
+        'audio_codec=raw',
+        'video_codec_options=i-frame-interval:int=1',
+      ]);
+
+      scrcpyProc.stdout.on('data', (d) => {
+        const text = d.toString().trim();
+        if (text.includes('Device:')) console.log('[scrcpy]', text);
+      });
+
+      scrcpyProc.on('exit', () => {
         if (active) {
-          setTimeout(startH264Pipeline, 200);
+          setTimeout(() => startStream(deviceId, serial), 1500);
         }
       });
 
-      screenrecordProc.on('error', (err) => {
-        console.warn(`[Stream] Pipeline warning: ${err.message}. Retrying in 400ms...`);
-        if (active) setTimeout(startH264Pipeline, 400);
-      });
-    } catch (e) {
-      if (active) setTimeout(startH264Pipeline, 400);
-    }
-  };
-
-  startH264Pipeline();
-
-  // Headless audio capture via scrcpy (zero popup desktop window)
-  const scrcpyBin = findScrcpy();
-  if (scrcpyBin) {
-    try {
-      audioProc = spawn(scrcpyBin, [
-        '-s', serial,
-        '--no-video',
-        '--no-playback',
-        '--audio-codec=raw',
-        '--record=-',
-        '--record-format=wav'
-      ], { stdio: ['ignore', 'pipe', 'ignore'] });
-
-      audioProc.stdout.on('data', (audioChunk) => {
-        if (!active || !ws || ws.readyState !== 1) return;
-        const devIds = serialToDeviceIds.get(serial);
-        if (devIds) {
-          for (const dId of devIds) {
-            // Prefix audio packets with 'AUD:' + deviceId (36 chars)
-            ws.send(Buffer.concat([Buffer.from('AUD:' + dId, 'utf8'), audioChunk]));
+      activeStreams.set(serial, {
+        stop: () => {
+          active = false;
+          if (controlSock) { controlSock.destroy(); controlSockets.delete(serial); }
+          if (videoSock) videoSock.destroy();
+          if (audioSock) audioSock.destroy();
+          if (server) server.close();
+          if (scrcpyProc) {
+            try { scrcpyProc.kill(); } catch (e) {}
           }
-        }
+          execFile(adbPath, ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${scid}`], () => {});
+        },
+        serial,
       });
-
-      audioProc.on('error', () => {});
-    } catch (e) {}
-  }
-
-  activeStreams.set(serial, {
-    stop: () => {
-      active = false;
-      if (screenrecordProc) {
-        try { screenrecordProc.kill(); } catch (e) {}
-      }
-      if (audioProc) {
-        try { audioProc.kill(); } catch (e) {}
-      }
-    },
-    serial
-  });
+    } catch (err) {
+      console.error(`[StreamBridge] Pure scrcpy pipeline error for ${serial}:`, err.message);
+      if (active) setTimeout(() => startStream(deviceId, serial), 3000);
+    }
+  })();
 }
 
 function stopStream(deviceId) {
@@ -627,11 +781,11 @@ async function discoverAndSync() {
               }));
             }
 
-            // Initiate or map screen stream for this device serial
+            // Initiate or map screen stream for this device serial only if not yet active
             if (!activeStreams.has(ser)) {
               console.log(`[StreamBridge] 🚀 Auto-starting video stream for ${d.device_name} (${ser})...`);
+              startStream(devId, ser);
             }
-            startStream(devId, ser);
           }
         }
       } else {

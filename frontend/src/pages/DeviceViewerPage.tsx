@@ -249,22 +249,40 @@ export const DeviceViewerPage: React.FC = () => {
 
   // Convert overlay click/touch coordinates to Android device physical coordinates
   const getDeviceCoords = (clientX: number, clientY: number) => {
-    const el = overlayRef.current || videoRef.current || canvasRef.current;
+    const el = overlayRef.current;
     if (!el || !device) return null;
 
     const rect = el.getBoundingClientRect();
-    const targetWidth = device.screen_width || 720;
-    const targetHeight = device.screen_height || 1600;
-    const scaleX = targetWidth / rect.width;
-    const scaleY = targetHeight / rect.height;
+    const deviceWidth = device.screen_width || 720;
+    const deviceHeight = device.screen_height || 1600;
 
-    const x = (clientX - rect.left) * scaleX;
-    const y = (clientY - rect.top) * scaleY;
+    let clientWidth = rect.width;
+    let clientHeight = rect.height;
+    let touchX = clientX - rect.left;
+    let touchY = clientY - rect.top;
 
-    return {
-      x: Math.max(0, Math.min(targetWidth, x)),
-      y: Math.max(0, Math.min(targetHeight, y)),
-    };
+    // Correct for aspect ratio letterboxing / pillarboxing
+    const deviceRatio = deviceWidth / deviceHeight;
+    const containerRatio = clientWidth / clientHeight;
+
+    if (containerRatio > deviceRatio) {
+      // Container is wider than device: black bars left and right (pillarbox)
+      const realWidth = clientHeight * deviceRatio;
+      const leftOffset = (clientWidth - realWidth) / 2;
+      touchX -= leftOffset;
+      clientWidth = realWidth;
+    } else {
+      // Container is taller than device: black bars top and bottom (letterbox)
+      const realHeight = clientWidth / deviceRatio;
+      const topOffset = (clientHeight - realHeight) / 2;
+      touchY -= topOffset;
+      clientHeight = realHeight;
+    }
+
+    const x = Math.max(0, Math.min(deviceWidth, Math.round((touchX * deviceWidth) / clientWidth)));
+    const y = Math.max(0, Math.min(deviceHeight, Math.round((touchY * deviceHeight) / clientHeight)));
+
+    return { x, y };
   };
 
   const sendInput = (action: string, data: any) => {
@@ -276,43 +294,48 @@ export const DeviceViewerPage: React.FC = () => {
     }));
   };
 
+  const lastMoveSentRef = useRef(0);
+
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!canControl) return;
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
     isMouseDownRef.current = true;
-    touchStartPosRef.current = { x: coords.x, y: coords.y, time: Date.now() };
+    sendInput('touch_down', { x: coords.x, y: coords.y });
   };
 
-  const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!canControl || !isMouseDownRef.current || !touchStartPosRef.current) return;
-    isMouseDownRef.current = false;
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!canControl || !isMouseDownRef.current) return;
+    const now = Date.now();
+    // Throttle to ~12ms (~80Hz) for ultra-fluid real-time touch without flooding websocket
+    if (now - lastMoveSentRef.current < 12) return;
+    lastMoveSentRef.current = now;
 
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    const start = touchStartPosRef.current;
-    const deltaX = coords.x - start.x;
-    const deltaY = coords.y - start.y;
-    const distance = Math.hypot(deltaX, deltaY);
-    const duration = Date.now() - start.time;
+    sendInput('touch_move', { x: coords.x, y: coords.y });
+  };
 
-    if (distance > 15) {
-      // Natural kinetic swipe gesture
-      sendInput('swipe', {
-        startX: start.x,
-        startY: start.y,
-        endX: coords.x,
-        endY: coords.y,
-        durationMs: Math.max(120, Math.min(duration, 300)),
-      });
-    } else {
-      // Instant tap
-      sendInput('tap', { x: coords.x, y: coords.y });
+  const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!canControl || !isMouseDownRef.current) return;
+    isMouseDownRef.current = false;
+
+    const coords = getDeviceCoords(e.clientX, e.clientY);
+    if (coords) {
+      sendInput('touch_up', { x: coords.x, y: coords.y });
     }
+  };
 
-    touchStartPosRef.current = null;
+  const handleMouseLeave = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!canControl || !isMouseDownRef.current) return;
+    isMouseDownRef.current = false;
+
+    const coords = getDeviceCoords(e.clientX, e.clientY);
+    if (coords) {
+      sendInput('touch_up', { x: coords.x, y: coords.y });
+    }
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
@@ -320,34 +343,32 @@ export const DeviceViewerPage: React.FC = () => {
     const touch = e.touches[0];
     const coords = getDeviceCoords(touch.clientX, touch.clientY);
     if (!coords) return;
+
     isMouseDownRef.current = true;
-    touchStartPosRef.current = { x: coords.x, y: coords.y, time: Date.now() };
+    sendInput('touch_down', { x: coords.x, y: coords.y });
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!canControl || !isMouseDownRef.current || e.touches.length === 0) return;
+    const now = Date.now();
+    if (now - lastMoveSentRef.current < 12) return;
+    lastMoveSentRef.current = now;
+
+    const touch = e.touches[0];
+    const coords = getDeviceCoords(touch.clientX, touch.clientY);
+    if (!coords) return;
+
+    sendInput('touch_move', { x: coords.x, y: coords.y });
   };
 
   const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
-    if (!canControl || !isMouseDownRef.current || !touchStartPosRef.current) return;
+    if (!canControl || !isMouseDownRef.current) return;
     isMouseDownRef.current = false;
     const touch = e.changedTouches[0];
     const coords = touch ? getDeviceCoords(touch.clientX, touch.clientY) : null;
-    const start = touchStartPosRef.current;
-    if (coords && start) {
-      const deltaX = coords.x - start.x;
-      const deltaY = coords.y - start.y;
-      const distance = Math.hypot(deltaX, deltaY);
-      const duration = Date.now() - start.time;
-      if (distance > 15) {
-        sendInput('swipe', {
-          startX: start.x,
-          startY: start.y,
-          endX: coords.x,
-          endY: coords.y,
-          durationMs: Math.max(120, Math.min(duration, 300)),
-        });
-      } else {
-        sendInput('tap', { x: coords.x, y: coords.y });
-      }
+    if (coords) {
+      sendInput('touch_up', { x: coords.x, y: coords.y });
     }
-    touchStartPosRef.current = null;
   };
 
   const toggleFullscreen = () => {
@@ -479,8 +500,11 @@ export const DeviceViewerPage: React.FC = () => {
           <div
             ref={overlayRef}
             onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseLeave}
             onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
             className={`absolute inset-0 z-10 select-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
           />
