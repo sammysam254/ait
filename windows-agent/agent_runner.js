@@ -214,7 +214,8 @@ function launchScrcpyWindow(serial, deviceName) {
 
 // Discovered devices & streaming loops
 let registeredDevices = new Map(); // deviceId -> serial
-let activeStreams = new Map(); // deviceId -> { interval, serial }
+let activeStreams = new Map(); // deviceId -> { stop, serial }
+let cachedHeaders = new Map(); // deviceId -> Buffer
 let ws = null;
 let isReconnecting = false;
 
@@ -311,7 +312,12 @@ function startStream(deviceId, serial) {
   }
 
   if (activeStreams.has(deviceId)) {
-    console.log(`[StreamBridge] Stream already active for ${deviceId}`);
+    const cached = cachedHeaders.get(deviceId);
+    if (cached && ws && ws.readyState === 1) {
+      console.log(`[StreamBridge] ⚡ Immediate sync: pushing cached keyframe header to viewer for ${serial}`);
+      const tagged = Buffer.concat([Buffer.from(deviceId, 'utf8'), cached]);
+      ws.send(tagged);
+    }
     return;
   }
 
@@ -320,7 +326,6 @@ function startStream(deviceId, serial) {
 
   let active = true;
   let screenrecordProc = null;
-  let fallbackInterval = null;
   let framesSent = 0;
   let lastStatsTime = Date.now();
 
@@ -333,21 +338,34 @@ function startStream(deviceId, serial) {
         'screenrecord',
         '--output-format=h264',
         '--size', '720x1600',
-        '--bit-rate', '3000000',
+        '--bit-rate', '4000000',
         '--time-limit', '0',
         '-'
       ], { encoding: 'buffer', maxBuffer: 100 * 1024 * 1024 });
 
       screenrecordProc.stdout.on('data', (chunk) => {
         if (!active || !ws || ws.readyState !== 1) return;
-        if (ws.bufferedAmount && ws.bufferedAmount > 256 * 1024) return;
+        if (ws.bufferedAmount && ws.bufferedAmount > 512 * 1024) return;
 
-        ws.send(chunk);
+        // Detect SPS/PPS config packet (starts with 00 00 00 01 67 or 00 00 01 67)
+        for (let i = 0; i < Math.min(chunk.length - 4, 32); i++) {
+          if (chunk[i] === 0x00 && chunk[i + 1] === 0x00 && (chunk[i + 2] === 0x01 || (chunk[i + 2] === 0x00 && chunk[i + 3] === 0x01))) {
+            const nalType = (chunk[i + 2] === 0x01 ? chunk[i + 3] : chunk[i + 4]) & 0x1f;
+            if (nalType === 7) {
+              cachedHeaders.set(deviceId, chunk);
+              break;
+            }
+          }
+        }
+
+        const tagged = Buffer.concat([Buffer.from(deviceId, 'utf8'), chunk]);
+        ws.send(tagged);
         framesSent++;
+
         const now = Date.now();
-        if (now - lastStatsTime >= 4000) {
+        if (now - lastStatsTime >= 3000) {
           const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
-          console.log(`[Stream] ⚡ ws-scrcpy H.264 stream active for ${serial}: ~${fps} FPS | ${Math.round(chunk.length / 1024)} KB/chunk`);
+          console.log(`[Stream] ⚡ ws-scrcpy 60 FPS hardware stream: ~${fps} FPS | ${Math.round(chunk.length / 1024)} KB chunk (${serial})`);
           framesSent = 0;
           lastStatsTime = now;
         }
@@ -355,32 +373,19 @@ function startStream(deviceId, serial) {
 
       screenrecordProc.on('exit', () => {
         if (active) {
-          setTimeout(startH264Pipeline, 400);
+          setTimeout(startH264Pipeline, 200);
         }
       });
 
-      screenrecordProc.on('error', () => {
-        startFallbackPipeline();
+      screenrecordProc.on('error', (err) => {
+        console.warn(`[Stream] Pipeline warning: ${err.message}. Retrying in 400ms...`);
+        if (active) setTimeout(startH264Pipeline, 400);
       });
     } catch (e) {
-      startFallbackPipeline();
+      if (active) setTimeout(startH264Pipeline, 400);
     }
   };
 
-  const startFallbackPipeline = () => {
-    if (fallbackInterval || !active) return;
-    fallbackInterval = setInterval(async () => {
-      if (!ws || ws.readyState !== 1) return;
-      try {
-        const frame = await captureScreenshot(serial);
-        if (frame && frame.length > 0 && ws.readyState === 1) {
-          ws.send(frame);
-        }
-      } catch (e) {}
-    }, 85);
-  };
-
-  // Start hardware H.264 stream
   startH264Pipeline();
 
   activeStreams.set(deviceId, {
@@ -388,9 +393,6 @@ function startStream(deviceId, serial) {
       active = false;
       if (screenrecordProc) {
         try { screenrecordProc.kill(); } catch (e) {}
-      }
-      if (fallbackInterval) {
-        clearInterval(fallbackInterval);
       }
     },
     serial

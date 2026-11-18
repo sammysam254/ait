@@ -19,7 +19,7 @@ interface ClientSession {
 
 export class SignalingServer {
   private wss: WebSocketServer;
-  private deviceRooms: Map<string, { agent?: ClientSession; viewers: Set<ClientSession> }> = new Map();
+  private deviceRooms: Map<string, { agent?: ClientSession; viewers: Set<ClientSession>; lastHeader?: Buffer }> = new Map();
 
   constructor(server: HttpServer) {
     this.wss = new WebSocketServer({ server, path: '/ws' });
@@ -164,13 +164,47 @@ export class SignalingServer {
         // Can be text signaling message or binary video frame
         if (typeof data !== 'string' && !(data instanceof String)) {
           // Binary message: Video frame stream from scrcpy streaming bridge
-          // Forward binary video data to all active viewers in rooms owned by this agent
-          for (const [devId, room] of this.deviceRooms.entries()) {
-            if ((room.agent === session || !room.agent) && room.viewers.size > 0) {
-              if (!room.agent) room.agent = session;
-              for (const viewer of room.viewers) {
-                if (viewer.ws.readyState === WebSocket.OPEN) {
-                  viewer.ws.send(data);
+          const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as any);
+          let targetDeviceId: string | null = null;
+          let videoPayload = buf;
+
+          // Check if payload starts with a 36-char UUID prefix (8-4-4-4-12)
+          if (buf.length > 36) {
+            const prefix = buf.subarray(0, 36).toString('utf8');
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(prefix)) {
+              targetDeviceId = prefix;
+              videoPayload = buf.subarray(36);
+            }
+          }
+
+          // Detect SPS / PPS keyframe config headers
+          const isConfig = (videoPayload.length >= 5 &&
+            ((videoPayload[0] === 0x00 && videoPayload[1] === 0x00 && videoPayload[2] === 0x00 && videoPayload[3] === 0x01 && (videoPayload[4] & 0x1f) === 7) ||
+             (videoPayload[0] === 0x00 && videoPayload[1] === 0x00 && videoPayload[2] === 0x01 && (videoPayload[3] & 0x1f) === 7)));
+
+          if (targetDeviceId) {
+            const room = this.getRoom(targetDeviceId);
+            room.agent = session;
+            if (isConfig) {
+              room.lastHeader = videoPayload;
+            }
+            for (const viewer of room.viewers) {
+              if (viewer.ws.readyState === WebSocket.OPEN) {
+                viewer.ws.send(videoPayload);
+              }
+            }
+          } else {
+            // Forward to active viewers in rooms owned by this agent
+            for (const [devId, room] of this.deviceRooms.entries()) {
+              if ((room.agent === session || !room.agent) && room.viewers.size > 0) {
+                if (!room.agent) room.agent = session;
+                if (isConfig) {
+                  room.lastHeader = videoPayload;
+                }
+                for (const viewer of room.viewers) {
+                  if (viewer.ws.readyState === WebSocket.OPEN) {
+                    viewer.ws.send(videoPayload);
+                  }
                 }
               }
             }
@@ -271,6 +305,11 @@ export class SignalingServer {
       canView: session.canView,
       agentOnline: !!room.agent,
     }));
+
+    // If we have cached SPS/PPS header, send it immediately so the player starts with zero delay
+    if (room.lastHeader && session.ws.readyState === WebSocket.OPEN) {
+      session.ws.send(room.lastHeader);
+    }
 
     if (room.agent && room.agent.ws.readyState === WebSocket.OPEN) {
       // Request agent to start or refresh stream for this device
