@@ -92,7 +92,7 @@ async function main() {
           // Register device producers on stream bridge
           if (Array.isArray(data.devices)) {
             for (const d of data.devices) {
-              streamBridge.registerDeviceProducer(d.id);
+              streamBridge.registerDeviceProducer(d.id, d.adb_serial || d.adbSerial);
             }
           }
         } else if (resp.status === 403) {

@@ -13,6 +13,7 @@ export class StreamBridge {
   private ws: WebSocket | null = null;
   private options: StreamBridgeOptions;
   private activeStreams: Map<string, { interval: NodeJS.Timeout; serial: string }> = new Map();
+  private deviceSerials: Map<string, string> = new Map();
   private isReconnecting = false;
 
   constructor(options: StreamBridgeOptions) {
@@ -33,6 +34,10 @@ export class StreamBridge {
       this.ws.on('open', () => {
         console.log('[StreamBridge] Connected to cloud signaling server successfully.');
         this.isReconnecting = false;
+        // Re-register all known device producers with cloud server
+        for (const [devId, ser] of this.deviceSerials.entries()) {
+          this.registerDeviceProducer(devId, ser);
+        }
       });
 
       this.ws.on('message', async (data: string) => {
@@ -67,7 +72,10 @@ export class StreamBridge {
     }, 3000);
   }
 
-  public registerDeviceProducer(deviceId: string): void {
+  public registerDeviceProducer(deviceId: string, serial?: string): void {
+    if (serial) {
+      this.deviceSerials.set(deviceId, serial);
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
         type: 'agent-register-device',
@@ -95,9 +103,9 @@ export class StreamBridge {
       case 'control-input': {
         const { deviceId, action, data } = msg;
         const stream = this.activeStreams.get(deviceId);
-        const serial = stream ? stream.serial : (msg.serial || '');
-        if (serial) {
-          await this.options.adbManager.injectInput(serial, action, data);
+        const targetSerial = stream ? stream.serial : (msg.serial || this.deviceSerials.get(deviceId) || '');
+        if (targetSerial) {
+          await this.options.adbManager.injectInput(targetSerial, action, data);
         }
         break;
       }
@@ -112,10 +120,17 @@ export class StreamBridge {
     }
   }
 
-  public startDeviceStream(deviceId: string, serial: string): void {
+  public startDeviceStream(deviceId: string, serial?: string): void {
+    const targetSerial = serial || this.deviceSerials.get(deviceId) || '';
+    if (!targetSerial) {
+      console.warn(`[StreamBridge] Cannot start stream: no serial known for device ${deviceId}`);
+      return;
+    }
+
     if (this.activeStreams.has(deviceId)) return;
 
-    // Fast frame capture stream loop for browser rendering (approx 15-20 fps low latency)
+    console.log(`[StreamBridge] Starting active stream for device ${deviceId} (${targetSerial})`);
+
     let inFlight = false;
     const interval = setInterval(async () => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
@@ -123,7 +138,7 @@ export class StreamBridge {
 
       inFlight = true;
       try {
-        const buffer = await this.options.adbManager.captureScreenshot(serial);
+        const buffer = await this.options.adbManager.captureScreenshot(targetSerial);
         if (buffer && buffer.length > 0 && this.ws.readyState === WebSocket.OPEN) {
           this.ws.send(buffer);
         }
@@ -134,8 +149,8 @@ export class StreamBridge {
       }
     }, 65); // ~15 FPS smooth low-latency browser mirroring
 
-    this.activeStreams.set(deviceId, { interval, serial });
-    this.registerDeviceProducer(deviceId);
+    this.activeStreams.set(deviceId, { interval, serial: targetSerial });
+    this.registerDeviceProducer(deviceId, targetSerial);
   }
 
   public stopDeviceStream(deviceId: string): void {
