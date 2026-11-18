@@ -24,6 +24,8 @@ netlify.env
 
 # Scrcpy binary zips
 *.zip
+!backend/resources/*.zip
+!windows-agent/resources/*.zip
 
 # Windows agent temp files
 windows-agent/dist/

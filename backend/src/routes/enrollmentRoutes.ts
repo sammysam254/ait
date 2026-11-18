@@ -97,9 +97,12 @@ router.post('/enroll', (req: Request, res: Response) => {
 router.get('/download-scrcpy', (req: Request, res: Response) => {
   // Check location of scrcpy zip
   const candidates = [
-    'C:/Users/sammy/.gemini/antigravity/brain/7828cce4-df5c-4217-9f5d-5efaa0eaa40d/.user_uploaded/media_1795009201223_4e2dcd56.zip',
+    path.resolve(__dirname, '../../resources/scrcpy-win64-v3.3.4.zip'),
+    path.resolve(process.cwd(), 'resources/scrcpy-win64-v3.3.4.zip'),
+    path.resolve(process.cwd(), 'backend/resources/scrcpy-win64-v3.3.4.zip'),
     path.resolve(process.cwd(), '../windows-agent/resources/scrcpy-win64-v3.3.4.zip'),
     path.resolve(process.cwd(), 'windows-agent/resources/scrcpy-win64-v3.3.4.zip'),
+    'C:/Users/sammy/.gemini/antigravity/brain/7828cce4-df5c-4217-9f5d-5efaa0eaa40d/.user_uploaded/media_1795009201223_4e2dcd56.zip',
   ];
 
   for (const candidate of candidates) {

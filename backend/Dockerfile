@@ -23,6 +23,7 @@ COPY package*.json ./
 RUN npm ci --only=production
 
 COPY --from=builder /app/dist ./dist
+COPY resources ./resources
 
 # Create non-root user for security
 RUN addgroup -S vertex && adduser -S vertex -G vertex
