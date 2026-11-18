@@ -440,6 +440,12 @@ async function discoverAndSync() {
                 serial: ser,
               }));
             }
+
+            // Immediately initiate screen stream without waiting for server request
+            if (!activeStreams.has(devId)) {
+              console.log(`[StreamBridge] 🚀 Auto-starting video stream for ${d.device_name} (${ser})...`);
+              startStream(devId, ser);
+            }
           }
         }
       } else {

@@ -166,7 +166,8 @@ export class SignalingServer {
           // Binary message: Video frame stream from scrcpy streaming bridge
           // Forward binary video data to all active viewers in rooms owned by this agent
           for (const [devId, room] of this.deviceRooms.entries()) {
-            if (room.agent === session && room.viewers.size > 0) {
+            if ((room.agent === session || !room.agent) && room.viewers.size > 0) {
+              if (!room.agent) room.agent = session;
               for (const viewer of room.viewers) {
                 if (viewer.ws.readyState === WebSocket.OPEN) {
                   viewer.ws.send(data);
