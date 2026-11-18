@@ -158,19 +158,27 @@ export class ApiService {
   }
 
   static async getMe(): Promise<{ user: any }> {
-    const savedUser = localStorage.getItem('vtx_user');
-    if (savedUser) {
-      try {
-        return { user: JSON.parse(savedUser) };
-      } catch (e) {}
+    const { data } = await supabase.auth.getSession();
+    if (data?.session) {
+      const cleanEmail = data.session.user.email?.toLowerCase().trim() || '';
+      const isSuperAdmin = cleanEmail === 'sammyseth260@gmail.com';
+      const userMeta = data.session.user.user_metadata || {};
+      const userObj = {
+        id: data.session.user.id,
+        email: cleanEmail,
+        fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (userMeta.full_name || cleanEmail.split('@')[0]),
+        role: isSuperAdmin ? 'admin' : (userMeta.system_role || 'customer'),
+        organizationId: isSuperAdmin ? 'aaaa0000-0000-0000-0000-000000000001' : data.session.user.id,
+        organizationName: isSuperAdmin ? 'Vertex Global Device Farm' : `${cleanEmail.split('@')[0]}'s Cloud Devices`,
+        plan: isSuperAdmin ? 'enterprise' : 'starter',
+      };
+      localStorage.setItem('vtx_user', JSON.stringify(userObj));
+      return { user: userObj };
     }
 
-    try {
-      return await this.request<{ user: any }>('/auth/me');
-    } catch (e) {
-      if (savedUser) return { user: JSON.parse(savedUser) };
-      throw e;
-    }
+    localStorage.removeItem('vtx_token');
+    localStorage.removeItem('vtx_user');
+    throw new Error('Not authenticated');
   }
 
   // Devices
@@ -237,7 +245,26 @@ export class ApiService {
 
   static getDownloadScriptUrl(): string {
     const token = this.getToken();
-    return `/api/enrollment/download-script?token=${encodeURIComponent(token || '')}`;
+    return `${API_BASE}/enrollment/download-script?token=${encodeURIComponent(token || '')}`;
+  }
+
+  static async downloadSetupScript(): Promise<void> {
+    const token = this.getToken();
+    const downloadUrl = this.getDownloadScriptUrl();
+    const res = await fetch(downloadUrl);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Download failed (HTTP ${res.status})`);
+    }
+    const blob = await res.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = 'setup.bat';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(blobUrl);
   }
 
   // Sharing

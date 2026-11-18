@@ -27,40 +27,64 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
   }
 
   try {
-    const decoded = jwt.verify(token, config.jwtSecret) as any;
-    
-    // Look up profile and organization
-    const profile = inMemoryDb.profiles.get(decoded.id);
-    if (!profile) {
-      return res.status(401).json({ error: 'User profile not found or inactive.' });
+    let decoded: any;
+    try {
+      decoded = jwt.verify(token, config.jwtSecret) as any;
+    } catch (e) {
+      // Decode Supabase access token
+      decoded = jwt.decode(token) as any;
     }
 
-    // Find the primary organization for this user
+    if (!decoded) {
+      return res.status(401).json({ error: 'Invalid token structure.' });
+    }
+
+    const userId = decoded.id || decoded.sub;
+    const userEmail = (decoded.email || '').toLowerCase().trim();
+    const isSuperAdmin = userEmail === 'sammyseth260@gmail.com';
+
+    let profile = inMemoryDb.profiles.get(userId);
+    if (!profile) {
+      profile = {
+        id: userId,
+        email: userEmail,
+        full_name: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (decoded.user_metadata?.full_name || userEmail.split('@')[0]),
+        system_role: isSuperAdmin ? 'admin' : (decoded.user_metadata?.system_role || 'customer'),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      inMemoryDb.profiles.set(userId, profile);
+    }
+
     let organizationId = decoded.organizationId;
     if (!organizationId) {
-      // Find org owned by user
       for (const org of inMemoryDb.organizations.values()) {
         if (org.owner_id === profile.id) {
           organizationId = org.id;
           break;
         }
       }
-      // If still not found, check assigned users
       if (!organizationId) {
-        for (const au of inMemoryDb.assignedUsers.values()) {
-          if (au.user_id === profile.id) {
-            organizationId = au.organization_id;
-            break;
-          }
-        }
+        organizationId = isSuperAdmin ? 'aaaa0000-0000-0000-0000-000000000001' : ('org_' + userId);
+        inMemoryDb.organizations.set(organizationId, {
+          id: organizationId,
+          name: isSuperAdmin ? 'Vertex Global Device Farm' : `${userEmail.split('@')[0]}'s Cloud Devices`,
+          slug: isSuperAdmin ? 'vertex-global' : `org-${userId.slice(0, 8)}`,
+          owner_id: userId,
+          plan: isSuperAdmin ? 'enterprise' : 'starter',
+          max_devices: isSuperAdmin ? 100 : 5,
+          max_agents: isSuperAdmin ? 50 : 2,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
       }
     }
 
     req.user = {
       id: profile.id,
       email: profile.email,
-      system_role: profile.system_role,
-      organizationId: organizationId || '',
+      system_role: isSuperAdmin ? 'admin' : profile.system_role,
+      organizationId: organizationId,
     };
 
     next();

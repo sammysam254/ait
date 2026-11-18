@@ -59,6 +59,20 @@ export const SetupScriptPage: React.FC = () => {
 
   const downloadUrl = ApiService.getDownloadScriptUrl();
 
+  const [downloading, setDownloading] = useState(false);
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      await ApiService.downloadSetupScript();
+    } catch (err: any) {
+      console.warn('Direct blob download error, falling back to window.open:', err);
+      window.open(downloadUrl, '_blank');
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
     <div className="space-y-8 max-w-5xl">
       {/* Title */}
@@ -85,13 +99,14 @@ export const SetupScriptPage: React.FC = () => {
             </p>
           </div>
 
-          <a
-            href={downloadUrl}
-            className="shrink-0 flex items-center gap-2.5 px-6 py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm shadow-xl shadow-indigo-600/40 transition transform active:scale-95"
+          <button
+            onClick={handleDownload}
+            disabled={downloading}
+            className="shrink-0 flex items-center gap-2.5 px-6 py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm shadow-xl shadow-indigo-600/40 transition transform active:scale-95 disabled:opacity-50 cursor-pointer"
           >
-            <DownloadCloud className="h-5 w-5" />
-            <span>DOWNLOAD SETUP.BAT</span>
-          </a>
+            <DownloadCloud className={`h-5 w-5 ${downloading ? 'animate-bounce' : ''}`} />
+            <span>{downloading ? 'DOWNLOADING...' : 'DOWNLOAD SETUP.BAT'}</span>
+          </button>
         </div>
 
         {/* Token Metadata Card */}

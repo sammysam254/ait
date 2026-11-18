@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User } from '../types';
 import { ApiService } from '../services/api';
+import { supabase } from '../services/supabase';
 
 interface AuthContextType {
   user: User | null;
@@ -60,8 +61,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
     localStorage.removeItem('vtx_token');
+    localStorage.removeItem('vtx_user');
+    await supabase.auth.signOut().catch(() => {});
     setUser(null);
   };
 
