@@ -79,6 +79,9 @@ if not exist "%VERTEX_DIR%" (
 )
 
 set "SCRCPY_DIR=%VERTEX_DIR%\\scrcpy"
+
+REM Clean up any legacy file collision where scrcpy was saved as a file instead of a folder
+if exist "%SCRCPY_DIR%" if not exist "%SCRCPY_DIR%\\*" del /f /q "%SCRCPY_DIR%" 2>nul
 if not exist "%SCRCPY_DIR%" mkdir "%SCRCPY_DIR%" 2>nul
 
 REM 4. Write Configuration File
@@ -125,13 +128,6 @@ if not exist "%SCRCPY_DIR%\\adb.exe" if exist "%LOCALAPPDATA%\\Android\\Sdk\\pla
     copy /Y "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\AdbWinUsbApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
 )
 
-if not exist "%SCRCPY_DIR%\\adb.exe" if exist "C:\\Program Files (x86)\\ONIRENT\\adb.exe" (
-    echo [FOUND] Discovered existing ADB at ONIRENT.
-    copy /Y "C:\\Program Files (x86)\\ONIRENT\\adb.exe" "%SCRCPY_DIR%\\" >nul 2>&1
-    copy /Y "C:\\Program Files (x86)\\ONIRENT\\AdbWinApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
-    copy /Y "C:\\Program Files (x86)\\ONIRENT\\AdbWinUsbApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
-)
-
 if not exist "%SCRCPY_DIR%\\adb.exe" if exist "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\adb.exe" (
     echo [FOUND] Discovered existing ADB at platform-tools.
     copy /Y "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\adb.exe" "%SCRCPY_DIR%\\" >nul 2>&1
@@ -161,21 +157,28 @@ if not exist "%SCRCPY_DIR%\\scrcpy.exe" (
 if "%NEED_INSTALL%" equ "1" (
     echo [*] Downloading and installing official scrcpy 3.3.4 ^& ADB binaries...
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "$ProgressPreference = 'SilentlyContinue'; " ^
       "$ErrorActionPreference = 'Stop'; " ^
       "try { " ^
       "  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " ^
-      "  $zip = '%VERTEX_DIR%\\scrcpy.zip'; " ^
-      "  $extract = '%VERTEX_DIR%\\scrcpy_extract'; " ^
+      "  $vertexDir = '%VERTEX_DIR%'; " ^
+      "  $scrcpyDir = '%SCRCPY_DIR%'; " ^
+      "  if (-not (Test-Path $scrcpyDir -PathType Container)) { " ^
+      "    if (Test-Path $scrcpyDir) { Remove-Item $scrcpyDir -Force; } " ^
+      "    New-Item -ItemType Directory -Force -Path $scrcpyDir | Out-Null; " ^
+      "  } " ^
+      "  $zip = Join-Path $vertexDir 'scrcpy.zip'; " ^
+      "  $extract = Join-Path $vertexDir 'scrcpy_extract'; " ^
       "  $downloaded = $false; " ^
       "  try { " ^
-      "    Write-Host '[*] Fetching bundle from cloud controller...' -ForegroundColor Cyan; " ^
+      "    [Console]::WriteLine('[*] Fetching bundle from cloud controller...'); " ^
       "    Invoke-WebRequest -Uri '${backendUrl}/api/enrollment/download-scrcpy' -OutFile $zip -TimeoutSec 30; " ^
       "    if ((Get-Item $zip).Length -gt 100000) { $downloaded = $true; } " ^
       "  } catch { " ^
-      "    Write-Host '[!] Cloud controller bundle unavailable, falling back to official release...' -ForegroundColor Yellow; " ^
+      "    [Console]::WriteLine('[!] Cloud controller bundle unavailable, falling back to official release...'); " ^
       "  } " ^
       "  if (-not $downloaded) { " ^
-      "    Write-Host '[*] Downloading scrcpy 3.3.4 from Genymobile official release...' -ForegroundColor Cyan; " ^
+      "    [Console]::WriteLine('[*] Downloading scrcpy 3.3.4 from Genymobile official release...'); " ^
       "    Invoke-WebRequest -Uri 'https://github.com/Genymobile/scrcpy/releases/download/v3.3.4/scrcpy-win64-v3.3.4.zip' -OutFile $zip -TimeoutSec 60; " ^
       "  } " ^
       "  if (Test-Path $extract) { Remove-Item $extract -Recurse -Force; } " ^
@@ -183,14 +186,14 @@ if "%NEED_INSTALL%" equ "1" (
       "  Remove-Item $zip -Force; " ^
       "  $bin = Get-ChildItem -Path $extract -Recurse -Filter 'scrcpy.exe' | Select-Object -First 1; " ^
       "  if ($bin) { " ^
-      "    Copy-Item -Path ($bin.Directory.FullName + '\\*') -Destination '%SCRCPY_DIR%' -Recurse -Force; " ^
-      "    Write-Host '[OK] scrcpy 3.3.4 and ADB binaries deployed successfully.' -ForegroundColor Green; " ^
+      "    Get-ChildItem -Path $bin.Directory.FullName | Copy-Item -Destination $scrcpyDir -Recurse -Force; " ^
+      "    [Console]::WriteLine('[OK] scrcpy 3.3.4 and ADB binaries deployed successfully.'); " ^
       "  } else { " ^
-      "    Write-Host '[ERROR] scrcpy.exe was not found in downloaded package.' -ForegroundColor Red; exit 1; " ^
+      "    [Console]::WriteLine('[ERROR] scrcpy.exe was not found in downloaded package.'); exit 1; " ^
       "  }; " ^
       "  Remove-Item $extract -Recurse -Force; " ^
       "} catch { " ^
-      "  Write-Host ('[ERROR] Failed to install scrcpy/ADB: ' + $_.Exception.Message) -ForegroundColor Red; " ^
+      "  [Console]::WriteLine('[ERROR] Failed to install scrcpy/ADB: ' + $_.Exception.Message); " ^
       "  exit 1; " ^
       "}"
 )
@@ -208,6 +211,7 @@ if exist "%SCRCPY_DIR%\\adb.exe" (
 )
 
 if exist "%SCRCPY_DIR%\\scrcpy.exe" (
+    echo.
     echo [OK] scrcpy is operational:
     "%SCRCPY_DIR%\\scrcpy.exe" --version
 ) else (
@@ -218,20 +222,21 @@ REM 7. Contact Cloud Controller to Complete Enrollment
 echo.
 echo [*] Enrolling computer "%COMPUTERNAME%" to ${orgName}...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ProgressPreference = 'SilentlyContinue'; " ^
   "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " ^
   "$body = @{ token = '${token}'; computerName = $env:COMPUTERNAME; osVersion = [System.Environment]::OSVersion.VersionString; arch = $env:PROCESSOR_ARCHITECTURE } | ConvertTo-Json; " ^
   "try { " ^
   "  $resp = Invoke-RestMethod -Uri '${backendUrl}/api/enrollment/enroll' -Method POST -Body $body -ContentType 'application/json'; " ^
   "  if ($resp.success) { " ^
-  "    Write-Host '[SUCCESS] Enrolled successfully with Cloud Controller!' -ForegroundColor Green; " ^
-  "    Write-Host ('Agent ID : ' + $resp.agent.id); " ^
+  "    [Console]::WriteLine('[SUCCESS] Enrolled successfully with Cloud Controller!'); " ^
+  "    [Console]::WriteLine('Agent ID : ' + $resp.agent.id); " ^
   "    $resp | ConvertTo-Json | Out-File -FilePath '%VERTEX_DIR%\\agent_credentials.json' -Encoding utf8; " ^
   "  } else { " ^
-  "    Write-Host ('[FAILED] ' + $resp.error) -ForegroundColor Red; " ^
+  "    [Console]::WriteLine('[FAILED] ' + $resp.error); " ^
   "    exit 1; " ^
   "  } " ^
   "} catch { " ^
-  "  Write-Host ('[ERROR] Failed to enroll with controller: ' + $_.Exception.Message) -ForegroundColor Red; " ^
+  "  [Console]::WriteLine('[ERROR] Failed to enroll with controller: ' + $_.Exception.Message); " ^
   "  exit 1; " ^
   "}"
 
