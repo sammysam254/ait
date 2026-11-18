@@ -288,17 +288,28 @@ if exist "%~dp0windows-agent\\agent_runner.js" (
       "} catch {}"
 )
 
-where node >nul 2>&1
+REM Locate Node.js executable
+set "NODE_BIN="
+if exist "C:\\Program Files\\nodejs\\node.exe" set "NODE_BIN=C:\\Program Files\\nodejs\\node.exe"
+if not defined NODE_BIN if exist "C:\\Program Files (x86)\\nodejs\\node.exe" set "NODE_BIN=C:\\Program Files (x86)\\nodejs\\node.exe"
+if not defined NODE_BIN if exist "%LOCALAPPDATA%\\Programs\\node\\node.exe" set "NODE_BIN=%LOCALAPPDATA%\\Programs\\node\\node.exe"
+if not defined NODE_BIN (
+    for /f "delims=" %%I in ('where node.exe 2^>nul') do (
+        if exist "%%~I" set "NODE_BIN=%%~I"
+    )
+)
+if not defined NODE_BIN set "NODE_BIN=node"
+
+"%NODE_BIN%" -v >nul 2>&1
 if %errorLevel% neq 0 (
     echo.
     echo ===============================================================================
-    echo [!] Node.js not detected in system PATH.
-    echo     Please install Node.js (https://nodejs.org) to run the streaming worker.
+    echo [!] Node.js runtime not found.
+    echo     Please install Node.js from https://nodejs.org
     echo ===============================================================================
     echo.
     echo Window will remain open for diagnostics.
-    pause
-    exit /b 1
+    cmd /k
 )
 
 echo.
@@ -307,7 +318,7 @@ echo [SUCCESS] SETUP COMPLETE - STARTING LIVE LOG MONITORING
 echo ===============================================================================
 echo.
 echo Connected phones with USB Debugging enabled will appear on your dashboard:
-echo ${backendUrl}
+echo ${dashboardUrl}
 echo.
 echo [IMPORTANT] DO NOT CLOSE THIS WINDOW.
 echo All real-time streaming diagnostics, device syncs, and touch inputs appear below.
@@ -316,14 +327,14 @@ echo ===========================================================================
 echo.
 
 :run_agent
-node "%VERTEX_DIR%\\agent_runner.js"
+"%NODE_BIN%" "%VERTEX_DIR%\\agent_runner.js"
 
 echo.
 echo ===============================================================================
-echo [!] Agent process exited (code %errorLevel%). Window will remain open.
+echo [!] Agent process exited. Window will remain open.
 echo Press any key to restart the agent...
 echo ===============================================================================
-pause >nul
+pause
 goto run_agent
 `;
 
