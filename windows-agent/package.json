@@ -1,0 +1,21 @@
+{
+  "name": "vertex-saas-windows-agent",
+  "version": "1.0.0",
+  "description": "Vertex SaaS Windows Host Agent for ADB Device Farm and scrcpy 3.3.4",
+  "main": "dist/agent.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/agent.js",
+    "dev": "ts-node src/agent.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/ws": "^8.5.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}
