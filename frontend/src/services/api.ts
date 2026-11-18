@@ -37,144 +37,124 @@ export class ApiService {
     }
   }
 
-  // Auth: Hybrid Supabase Auth & Backend API
-  static async login(email: string, password = 'password'): Promise<{ token: string; user: any }> {
+  // Auth: Supabase Auth as the single source of truth
+  static async login(email: string, password = ''): Promise<{ token: string; user: any }> {
     const cleanEmail = email.toLowerCase().trim();
+    if (!cleanEmail || !password) {
+      throw new Error('Please enter both email and password.');
+    }
+
     const isSuperAdmin = cleanEmail === 'sammyseth260@gmail.com';
 
-    // 1. Try Supabase Auth first
-    try {
-      const { data: supaData, error: supaErr } = await supabase.auth.signInWithPassword({
+    // Authenticate strictly with Supabase Auth
+    const { data: supaData, error: supaErr } = await supabase.auth.signInWithPassword({
+      email: cleanEmail,
+      password,
+    });
+
+    if (supaErr) {
+      const msg = supaErr.message.toLowerCase();
+      if (msg.includes('invalid login credentials') || msg.includes('invalid_grant')) {
+        throw new Error('Incorrect email or password. Please verify your credentials or create an account first.');
+      }
+      if (msg.includes('email not confirmed')) {
+        throw new Error('Please check your inbox and confirm your email before logging in.');
+      }
+      throw new Error(supaErr.message || 'Login failed. Please check your credentials.');
+    }
+
+    if (supaData?.session) {
+      const userMeta = supaData.session.user.user_metadata || {};
+      const userObj = {
+        id: supaData.session.user.id,
         email: cleanEmail,
-        password,
-      });
+        fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (userMeta.full_name || cleanEmail.split('@')[0]),
+        role: isSuperAdmin ? 'admin' : (userMeta.system_role || 'customer'),
+        organizationId: isSuperAdmin ? 'aaaa0000-0000-0000-0000-000000000001' : supaData.session.user.id,
+        organizationName: isSuperAdmin ? 'Vertex Global Device Farm' : `${cleanEmail.split('@')[0]}'s Cloud Devices`,
+        plan: isSuperAdmin ? 'enterprise' : 'starter',
+      };
 
-      if (supaData?.session) {
-        const userObj = {
-          id: supaData.session.user.id,
-          email: cleanEmail,
-          fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (supaData.session.user.user_metadata?.full_name || cleanEmail.split('@')[0]),
-          role: isSuperAdmin ? 'admin' : (supaData.session.user.user_metadata?.system_role || 'customer'),
-          organizationId: isSuperAdmin ? 'aaaa0000-0000-0000-0000-000000000001' : supaData.session.user.id,
-          organizationName: isSuperAdmin ? 'Vertex Global Device Farm' : `${cleanEmail.split('@')[0]}'s Cloud Devices`,
-          plan: isSuperAdmin ? 'enterprise' : 'starter',
-        };
-
-        const token = supaData.session.access_token;
-        localStorage.setItem('vtx_user', JSON.stringify(userObj));
-        return { token, user: userObj };
-      }
-    } catch (e) {
-      console.warn('[Auth] Supabase auth attempt:', e);
+      const token = supaData.session.access_token;
+      localStorage.setItem('vtx_user', JSON.stringify(userObj));
+      return { token, user: userObj };
     }
 
-    // 2. Try Backend API
-    try {
-      const res = await this.request<{ token: string; user: any }>('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email: cleanEmail, password }),
-      });
-      localStorage.setItem('vtx_user', JSON.stringify(res.user));
-      return res;
-    } catch (apiErr: any) {
-      // 3. Fallback: If backend is offline / 502, but user is the platform owner/Super Admin
-      if (isSuperAdmin) {
-        const userObj = {
-          id: '11111111-1111-1111-1111-111111111111',
-          email: cleanEmail,
-          fullName: 'Sammy Seth (Super Admin & Owner)',
-          role: 'admin',
-          organizationId: 'aaaa0000-0000-0000-0000-000000000001',
-          organizationName: 'Vertex SaaS Global Operations',
-          plan: 'enterprise',
-        };
-        const demoToken = 'vtx_admin_session_' + Date.now();
-        localStorage.setItem('vtx_user', JSON.stringify(userObj));
-        return { token: demoToken, user: userObj };
-      }
-
-      // If regular user and backend 502, create local session
-      if (apiErr.message?.includes('502') || apiErr.message?.includes('Failed to fetch')) {
-        const userObj = {
-          id: 'user_' + Date.now(),
-          email: cleanEmail,
-          fullName: cleanEmail.split('@')[0],
-          role: 'customer',
-          organizationId: 'org_' + Date.now(),
-          organizationName: `${cleanEmail.split('@')[0]}'s Devices`,
-          plan: 'starter',
-        };
-        const token = 'vtx_session_' + Date.now();
-        localStorage.setItem('vtx_user', JSON.stringify(userObj));
-        return { token, user: userObj };
-      }
-
-      throw apiErr;
-    }
+    throw new Error('Login failed. Please check your credentials.');
   }
 
   static async register(email: string, password: string, fullName: string, companyName?: string): Promise<{ token: string; user: any }> {
     const cleanEmail = email.toLowerCase().trim();
+    if (!cleanEmail || !password) {
+      throw new Error('Please enter both email and password.');
+    }
+    if (password.length < 6) {
+      throw new Error('Password must be at least 6 characters long.');
+    }
+
     const isSuperAdmin = cleanEmail === 'sammyseth260@gmail.com';
 
-    // 1. Try Supabase signUp
-    try {
-      const { data: supaData, error: supaErr } = await supabase.auth.signUp({
-        email: cleanEmail,
-        password: password,
-        options: {
-          data: {
-            full_name: fullName,
-            system_role: isSuperAdmin ? 'admin' : 'customer',
-          },
+    // Register with Supabase Auth
+    const { data: supaData, error: supaErr } = await supabase.auth.signUp({
+      email: cleanEmail,
+      password,
+      options: {
+        data: {
+          full_name: fullName,
+          system_role: isSuperAdmin ? 'admin' : 'customer',
         },
-      });
+      },
+    });
 
-      if (supaErr && supaErr.message.toLowerCase().includes('already registered')) {
-        return await this.login(cleanEmail, password);
+    if (supaErr) {
+      const msg = supaErr.message.toLowerCase();
+      if (msg.includes('already registered')) {
+        throw new Error('An account with this email already exists. Please sign in instead.');
       }
+      throw new Error(supaErr.message || 'Registration failed. Please try again.');
+    }
 
-      if (supaData?.user) {
+    if (supaData?.user) {
+      // If auto-logged in with session
+      if (supaData.session) {
         const userObj = {
-          id: supaData.user.id,
+          id: supaData.session.user.id,
           email: cleanEmail,
           fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
           role: isSuperAdmin ? 'admin' : 'customer',
-          organizationId: supaData.user.id,
+          organizationId: supaData.session.user.id,
           organizationName: companyName || `${cleanEmail.split('@')[0]}'s Cloud Devices`,
           plan: isSuperAdmin ? 'enterprise' : 'starter',
         };
-        const token = supaData.session?.access_token || ('vtx_auth_' + supaData.user.id);
+        const token = supaData.session.access_token;
         localStorage.setItem('vtx_user', JSON.stringify(userObj));
         return { token, user: userObj };
       }
-    } catch (e) {
-      console.warn('[Auth] Supabase exception during signup:', e);
+
+      // If session is null (e.g. Supabase auto-confirmed or requires sign-in)
+      try {
+        const loginAttempt = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
+        if (loginAttempt.data?.session) {
+          const userObj = {
+            id: loginAttempt.data.session.user.id,
+            email: cleanEmail,
+            fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
+            role: isSuperAdmin ? 'admin' : 'customer',
+            organizationId: loginAttempt.data.session.user.id,
+            organizationName: companyName || `${cleanEmail.split('@')[0]}'s Cloud Devices`,
+            plan: isSuperAdmin ? 'enterprise' : 'starter',
+          };
+          const token = loginAttempt.data.session.access_token;
+          localStorage.setItem('vtx_user', JSON.stringify(userObj));
+          return { token, user: userObj };
+        }
+      } catch (e) {}
+
+      // Confirmation email required
+      throw new Error('Account created! If you received a confirmation email, please confirm it, then sign in.');
     }
 
-    // 2. Try Backend API
-    try {
-      const res = await this.request<{ token: string; user: any }>('/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({ email: cleanEmail, password, fullName, companyName }),
-      });
-      localStorage.setItem('vtx_user', JSON.stringify(res.user));
-      return res;
-    } catch (err: any) {
-      // Fallback local session if backend returns 502
-      const userObj = {
-        id: isSuperAdmin ? '11111111-1111-1111-1111-111111111111' : 'usr_' + Date.now(),
-        email: cleanEmail,
-        fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
-        role: isSuperAdmin ? 'admin' : 'customer',
-        organizationId: isSuperAdmin ? 'aaaa0000-0000-0000-0000-000000000001' : 'org_' + Date.now(),
-        organizationName: isSuperAdmin ? 'Vertex SaaS Global Operations' : (companyName || `${cleanEmail.split('@')[0]}'s Devices`),
-        plan: isSuperAdmin ? 'enterprise' : 'starter',
-      };
-      const token = 'vtx_reg_' + Date.now();
-      localStorage.setItem('vtx_user', JSON.stringify(userObj));
-      return { token, user: userObj };
-    }
+    throw new Error('Registration failed. Please check your details and try again.');
   }
 
   static async getMe(): Promise<{ user: any }> {
