@@ -179,6 +179,39 @@ async function injectInput(serial, action, data) {
   return false;
 }
 
+// Native scrcpy 60 FPS launcher
+const launchedScrcpySerials = new Set();
+
+function launchScrcpyWindow(serial, deviceName) {
+  if (launchedScrcpySerials.has(serial)) return;
+  const scrcpyCandidates = [
+    path.join(agentDir, 'scrcpy', 'scrcpy.exe'),
+    path.join(__dirname, 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
+    path.join(process.cwd(), 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
+    'scrcpy.exe'
+  ];
+  let exe = '';
+  for (const c of scrcpyCandidates) {
+    if (fs.existsSync(c)) { exe = c; break; }
+  }
+  if (!exe) return;
+
+  try {
+    const title = `Vertex SaaS - ${deviceName || serial} (60 FPS Native)`;
+    const p = execFile(exe, ['-s', serial, '--stay-awake', '--window-title', title], {
+      windowsHide: false,
+      detached: true,
+      stdio: 'ignore'
+    });
+    p.unref();
+    launchedScrcpySerials.add(serial);
+    console.log(`[Scrcpy] ⚡ Launched native 60 FPS hardware window for ${deviceName || serial}`);
+    p.on('exit', () => {
+      launchedScrcpySerials.delete(serial);
+    });
+  } catch (e) {}
+}
+
 // Discovered devices & streaming loops
 let registeredDevices = new Map(); // deviceId -> serial
 let activeStreams = new Map(); // deviceId -> { interval, serial }
@@ -282,49 +315,93 @@ function startStream(deviceId, serial) {
     return;
   }
 
-  console.log(`[StreamBridge] 🚀 Starting live real-time screen stream for ${deviceId} (${serial})...`);
+  console.log(`[StreamBridge] 🚀 Starting live ws-scrcpy hardware stream for ${deviceId} (${serial})...`);
   wakePhone(serial);
 
-  let inFlight = false;
+  let active = true;
+  let screenrecordProc = null;
+  let fallbackInterval = null;
   let framesSent = 0;
   let lastStatsTime = Date.now();
 
-  const interval = setInterval(async () => {
-    if (!ws || ws.readyState !== 1) return; // 1 = OPEN
-    if (inFlight) return;
-    if (ws.bufferedAmount && ws.bufferedAmount > 256 * 1024) {
-      // Backpressure: drop stale frame so video stays real-time
-      return;
-    }
-
-    inFlight = true;
+  const startH264Pipeline = () => {
+    if (!active) return;
     try {
-      const frameBuffer = await captureScreenshot(serial);
-      if (frameBuffer && frameBuffer.length > 0 && ws.readyState === 1) {
-        ws.send(frameBuffer);
+      screenrecordProc = execFile(adbPath, [
+        '-s', serial,
+        'exec-out',
+        'screenrecord',
+        '--output-format=h264',
+        '--size', '720x1600',
+        '--bit-rate', '3000000',
+        '--time-limit', '0',
+        '-'
+      ], { encoding: 'buffer', maxBuffer: 100 * 1024 * 1024 });
+
+      screenrecordProc.stdout.on('data', (chunk) => {
+        if (!active || !ws || ws.readyState !== 1) return;
+        if (ws.bufferedAmount && ws.bufferedAmount > 256 * 1024) return;
+
+        ws.send(chunk);
         framesSent++;
         const now = Date.now();
         if (now - lastStatsTime >= 4000) {
           const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
-          console.log(`[Stream] 📡 Live stream active for ${serial}: ~${fps} FPS | ${Math.round(frameBuffer.length / 1024)} KB/frame`);
+          console.log(`[Stream] ⚡ ws-scrcpy H.264 stream active for ${serial}: ~${fps} FPS | ${Math.round(chunk.length / 1024)} KB/chunk`);
           framesSent = 0;
           lastStatsTime = now;
         }
-      }
-    } catch (err) {
-      // Ignore single frame capture error
-    } finally {
-      inFlight = false;
-    }
-  }, 85); // ~12 FPS smooth real-time streaming
+      });
 
-  activeStreams.set(deviceId, { interval, serial });
+      screenrecordProc.on('exit', () => {
+        if (active) {
+          setTimeout(startH264Pipeline, 400);
+        }
+      });
+
+      screenrecordProc.on('error', () => {
+        startFallbackPipeline();
+      });
+    } catch (e) {
+      startFallbackPipeline();
+    }
+  };
+
+  const startFallbackPipeline = () => {
+    if (fallbackInterval || !active) return;
+    fallbackInterval = setInterval(async () => {
+      if (!ws || ws.readyState !== 1) return;
+      try {
+        const frame = await captureScreenshot(serial);
+        if (frame && frame.length > 0 && ws.readyState === 1) {
+          ws.send(frame);
+        }
+      } catch (e) {}
+    }, 85);
+  };
+
+  // Start hardware H.264 stream
+  startH264Pipeline();
+
+  activeStreams.set(deviceId, {
+    stop: () => {
+      active = false;
+      if (screenrecordProc) {
+        try { screenrecordProc.kill(); } catch (e) {}
+      }
+      if (fallbackInterval) {
+        clearInterval(fallbackInterval);
+      }
+    },
+    serial
+  });
 }
 
 function stopStream(deviceId) {
   const stream = activeStreams.get(deviceId);
   if (stream) {
-    clearInterval(stream.interval);
+    if (stream.stop) stream.stop();
+    else if (stream.interval) clearInterval(stream.interval);
     activeStreams.delete(deviceId);
     console.log(`[StreamBridge] Stopped stream for device: ${deviceId}`);
   }
@@ -404,12 +481,14 @@ async function discoverAndSync() {
 
     loggedNoDevices = false;
 
-    // Log newly detected devices
+    // Log newly detected devices & launch scrcpy native window
     for (const d of devices) {
       if (!knownSerials.has(d.adbSerial)) {
         console.log(`[Device] 📱 Discovered: ${d.deviceName} (${d.adbSerial}) [${d.screenWidth}x${d.screenHeight}]`);
         knownSerials.add(d.adbSerial);
       }
+      // Auto-launch native hardware 60 FPS scrcpy window
+      launchScrcpyWindow(d.adbSerial, d.deviceName);
     }
 
     if (config.agentId) {

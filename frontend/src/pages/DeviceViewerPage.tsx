@@ -88,6 +88,43 @@ export const DeviceViewerPage: React.FC = () => {
     };
 
     let frameCount = 0;
+    let videoDecoder: VideoDecoder | null = null;
+    let isDecoderConfigured = false;
+
+    // Initialize WebCodecs hardware H.264 video decoder for ws-scrcpy
+    if (typeof window !== 'undefined' && 'VideoDecoder' in window) {
+      try {
+        videoDecoder = new VideoDecoder({
+          output: (frame: VideoFrame) => {
+            const canvas = canvasRef.current;
+            if (canvas) {
+              if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+                canvas.width = frame.displayWidth;
+                canvas.height = frame.displayHeight;
+              }
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+              }
+            }
+            frame.close();
+          },
+          error: (err) => {
+            console.warn('[ws-scrcpy decoder error]', err);
+          },
+        });
+
+        videoDecoder.configure({
+          codec: 'avc1.42001f', // Baseline Profile level 3.1
+          optimizeForLatency: true,
+        });
+        isDecoderConfigured = true;
+      } catch (err) {
+        console.warn('[WebCodecs init failed]', err);
+        videoDecoder = null;
+      }
+    }
+
     const streamPoller = setInterval(() => {
       if (frameCount === 0 && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
@@ -107,8 +144,30 @@ export const DeviceViewerPage: React.FC = () => {
         } catch (e) {}
       } else if (event.data instanceof ArrayBuffer) {
         frameCount++;
-        // Binary image stream from Android (auto-detect JPEG or PNG)
         const bytes = new Uint8Array(event.data);
+
+        // Check for H.264 Annex B NAL unit from scrcpy-server (00 00 00 01 or 00 00 01)
+        const isH264 = (bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x00 && bytes[3] === 0x01) ||
+                       (bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01);
+
+        if (isH264 && videoDecoder && isDecoderConfigured && videoDecoder.state === 'configured') {
+          try {
+            const nalOffset = (bytes[2] === 0x01) ? 3 : 4;
+            const nalType = bytes[nalOffset] & 0x1f;
+            const isKey = nalType === 5 || nalType === 7 || nalType === 8;
+
+            videoDecoder.decode(new EncodedVideoChunk({
+              type: isKey ? 'key' : 'delta',
+              timestamp: performance.now() * 1000,
+              data: event.data,
+            }));
+            return;
+          } catch (e) {
+            // Fallback to image decoder if single packet error
+          }
+        }
+
+        // Binary image stream from Android (auto-detect JPEG or PNG fallback)
         const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
         const blob = new Blob([event.data], { type: isJpeg ? 'image/jpeg' : 'image/png' });
         const img = new Image();
@@ -136,12 +195,18 @@ export const DeviceViewerPage: React.FC = () => {
 
     ws.onerror = () => {
       clearInterval(streamPoller);
+      if (videoDecoder && videoDecoder.state !== 'closed') {
+        try { videoDecoder.close(); } catch (e) {}
+      }
       setStatus('error');
       setErrorMessage('Connection failed to cloud streaming gateway.');
     };
 
     ws.onclose = () => {
       clearInterval(streamPoller);
+      if (videoDecoder && videoDecoder.state !== 'closed') {
+        try { videoDecoder.close(); } catch (e) {}
+      }
       if (status !== 'error') {
         setStatus('offline');
       }

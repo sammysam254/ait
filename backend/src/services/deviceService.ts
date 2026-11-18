@@ -118,11 +118,12 @@ export class DeviceService {
     const detectedSerials = new Set(detectedDevices.map(d => d.adbSerial));
 
     for (const d of detectedDevices) {
-      // Find existing device by agentId and adbSerial
+      // Find existing device by organizationId and adbSerial (stable across agent restarts)
       let existing: Device | undefined;
       for (const dev of inMemoryDb.devices.values()) {
-        if (dev.agent_id === agentId && dev.adb_serial === d.adbSerial) {
+        if (dev.organization_id === organizationId && dev.adb_serial === d.adbSerial) {
           existing = dev;
+          existing.agent_id = agentId;
           break;
         }
       }
