@@ -83,6 +83,8 @@ export const DeviceViewerPage: React.FC = () => {
 
     ws.onopen = () => {
       setStatus('connected');
+      // Actively request streaming frame feed from the agent
+      ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
     };
 
     ws.onmessage = (event) => {
@@ -96,12 +98,16 @@ export const DeviceViewerPage: React.FC = () => {
           }
         } catch (e) {}
       } else if (event.data instanceof ArrayBuffer) {
-        // Binary image stream from Android
-        const blob = new Blob([event.data], { type: 'image/jpeg' });
+        // Binary image stream from Android (PNG or JPEG)
+        const blob = new Blob([event.data], { type: 'image/png' });
         const img = new Image();
         img.onload = () => {
           const canvas = canvasRef.current;
           if (canvas) {
+            if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+              canvas.width = img.naturalWidth || img.width;
+              canvas.height = img.naturalHeight || img.height;
+            }
             const ctx = canvas.getContext('2d');
             if (ctx) {
               ctx.drawImage(img, 0, 0, canvas.width, canvas.height);

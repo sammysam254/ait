@@ -189,6 +189,22 @@ export class SignalingServer {
             DeviceService.updateStatus(deviceId, 'online');
             session.ws.send(JSON.stringify({ type: 'registered', deviceId, success: true }));
             console.log(`[SignalingServer] Agent registered producer for device ${deviceId}`);
+
+            // If viewers are already in the room, immediately initiate the stream
+            if (room.viewers.size > 0) {
+              const dev = inMemoryDb.devices.get(deviceId);
+              const serial = dev ? dev.adb_serial : '';
+              session.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
+              DeviceService.updateStatus(deviceId, 'streaming');
+              for (const viewer of room.viewers) {
+                viewer.ws.send(JSON.stringify({
+                  type: 'connection-established',
+                  deviceId,
+                  agentOnline: true,
+                  canControl: viewer.canControl,
+                }));
+              }
+            }
             break;
           }
 
@@ -268,6 +284,16 @@ export class SignalingServer {
         const msg = JSON.parse(data.toString());
 
         switch (msg.type) {
+          case 'request-stream': {
+            if (room.agent && room.agent.ws.readyState === WebSocket.OPEN) {
+              const dev = inMemoryDb.devices.get(deviceId);
+              const serial = dev ? dev.adb_serial : '';
+              room.agent.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
+              DeviceService.updateStatus(deviceId, 'streaming');
+            }
+            break;
+          }
+
           case 'control-input': {
             // CRITICAL SECURITY CHECK: Enforce canControl authorization before executing input!
             if (!session.canControl) {
