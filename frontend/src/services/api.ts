@@ -113,15 +113,15 @@ export class ApiService {
     }
   }
 
-  static async register(email: string, fullName: string, companyName?: string): Promise<{ token: string; user: any }> {
+  static async register(email: string, password: string, fullName: string, companyName?: string): Promise<{ token: string; user: any }> {
     const cleanEmail = email.toLowerCase().trim();
     const isSuperAdmin = cleanEmail === 'sammyseth260@gmail.com';
 
     // 1. Try Supabase signUp
     try {
-      const { data: supaData } = await supabase.auth.signUp({
+      const { data: supaData, error: supaErr } = await supabase.auth.signUp({
         email: cleanEmail,
-        password: 'Password123!',
+        password: password,
         options: {
           data: {
             full_name: fullName,
@@ -130,39 +130,45 @@ export class ApiService {
         },
       });
 
-      if (supaData?.session) {
+      if (supaErr && supaErr.message.toLowerCase().includes('already registered')) {
+        return await this.login(cleanEmail, password);
+      }
+
+      if (supaData?.user) {
         const userObj = {
-          id: supaData.session.user.id,
+          id: supaData.user.id,
           email: cleanEmail,
           fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
           role: isSuperAdmin ? 'admin' : 'customer',
-          organizationId: supaData.session.user.id,
+          organizationId: supaData.user.id,
           organizationName: companyName || `${cleanEmail.split('@')[0]}'s Cloud Devices`,
           plan: isSuperAdmin ? 'enterprise' : 'starter',
         };
-        const token = supaData.session.access_token;
+        const token = supaData.session?.access_token || ('vtx_auth_' + supaData.user.id);
         localStorage.setItem('vtx_user', JSON.stringify(userObj));
         return { token, user: userObj };
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[Auth] Supabase exception during signup:', e);
+    }
 
     // 2. Try Backend API
     try {
       const res = await this.request<{ token: string; user: any }>('/auth/register', {
         method: 'POST',
-        body: JSON.stringify({ email: cleanEmail, fullName, companyName }),
+        body: JSON.stringify({ email: cleanEmail, password, fullName, companyName }),
       });
       localStorage.setItem('vtx_user', JSON.stringify(res.user));
       return res;
     } catch (err: any) {
       // Fallback local session if backend returns 502
       const userObj = {
-        id: 'usr_' + Date.now(),
+        id: isSuperAdmin ? '11111111-1111-1111-1111-111111111111' : 'usr_' + Date.now(),
         email: cleanEmail,
-        fullName: fullName || cleanEmail.split('@')[0],
+        fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
         role: isSuperAdmin ? 'admin' : 'customer',
-        organizationId: 'org_' + Date.now(),
-        organizationName: companyName || `${cleanEmail.split('@')[0]}'s Devices`,
+        organizationId: isSuperAdmin ? 'aaaa0000-0000-0000-0000-000000000001' : 'org_' + Date.now(),
+        organizationName: isSuperAdmin ? 'Vertex SaaS Global Operations' : (companyName || `${cleanEmail.split('@')[0]}'s Devices`),
         plan: isSuperAdmin ? 'enterprise' : 'starter',
       };
       const token = 'vtx_reg_' + Date.now();

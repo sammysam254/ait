@@ -95,7 +95,7 @@ router.post('/login', (req: Request, res: Response) => {
 
 // POST /api/auth/register
 router.post('/register', (req: Request, res: Response) => {
-  const { email, fullName, companyName } = req.body;
+  const { email, password, fullName, companyName } = req.body;
 
   if (!email) {
     return res.status(400).json({ error: 'Email is required.' });
