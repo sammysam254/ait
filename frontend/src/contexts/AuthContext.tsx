@@ -34,8 +34,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (token) {
       fetchCurrentUser();
     } else {
-      // Default to Super Admin login
-      login('sammyseth260@gmail.com').catch(() => setLoading(false));
+      setLoading(false);
     }
   }, []);
 
