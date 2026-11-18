@@ -459,7 +459,6 @@ function startStream(deviceId, targetSerial) {
   }
 
   console.log(`[StreamBridge] 🚀 Launching pure 60 FPS hardware scrcpy stream for ${deviceId} (${serial})...`);
-  wakePhone(serial);
 
   let active = true;
   let scrcpyProc = null;
@@ -470,6 +469,26 @@ function startStream(deviceId, targetSerial) {
   let framesSent = 0;
   let lastStatsTime = Date.now();
   let cachedConfig = null;
+  let scid = '';
+
+  const streamObj = {
+    stop: () => {
+      active = false;
+      activeStreams.delete(serial);
+      if (controlSock) { controlSock.destroy(); controlSockets.delete(serial); }
+      if (videoSock) videoSock.destroy();
+      if (audioSock) audioSock.destroy();
+      if (server) server.close();
+      if (scrcpyProc) {
+        try { scrcpyProc.kill(); } catch (e) {}
+      }
+      if (scid) {
+        execFile(adbPath, ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${scid}`], () => {});
+      }
+    },
+    serial,
+  };
+  activeStreams.set(serial, streamObj);
 
   (async () => {
     try {
@@ -479,7 +498,7 @@ function startStream(deviceId, targetSerial) {
       }
 
       // 2. Create local reverse TCP server on ephemeral port (avoids Win 10013 port conflicts)
-      const scid = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+      scid = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
       server = net.createServer();
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const port = server.address().port;
@@ -626,26 +645,13 @@ function startStream(deviceId, targetSerial) {
 
       scrcpyProc.on('exit', () => {
         if (active) {
+          activeStreams.delete(serial);
           setTimeout(() => startStream(deviceId, serial), 1500);
         }
       });
-
-      activeStreams.set(serial, {
-        stop: () => {
-          active = false;
-          if (controlSock) { controlSock.destroy(); controlSockets.delete(serial); }
-          if (videoSock) videoSock.destroy();
-          if (audioSock) audioSock.destroy();
-          if (server) server.close();
-          if (scrcpyProc) {
-            try { scrcpyProc.kill(); } catch (e) {}
-          }
-          execFile(adbPath, ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${scid}`], () => {});
-        },
-        serial,
-      });
     } catch (err) {
       console.error(`[StreamBridge] Pure scrcpy pipeline error for ${serial}:`, err.message);
+      activeStreams.delete(serial);
       if (active) setTimeout(() => startStream(deviceId, serial), 3000);
     }
   })();
