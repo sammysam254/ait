@@ -5,6 +5,7 @@
 const { execFile, execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 
 // Global WebSocket fallback for older Node versions
 let WsClient = globalThis.WebSocket;
