@@ -326,6 +326,12 @@ echo If any issue occurs, full error details will remain visible here.
 echo ===============================================================================
 echo.
 
+REM 9. Launch Native Ultra-Low Latency scrcpy Hardware Controller
+if exist "%SCRCPY_DIR%\\scrcpy.exe" (
+    echo [*] Launching native 60 FPS hardware scrcpy window...
+    start "" "%SCRCPY_DIR%\\scrcpy.exe" --stay-awake --window-title "Vertex Cloud Device Farm - Live Control"
+)
+
 :run_agent
 "%NODE_BIN%" "%VERTEX_DIR%\\agent_runner.js"
 
