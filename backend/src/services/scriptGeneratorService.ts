@@ -23,10 +23,8 @@ export class ScriptGeneratorService {
     );
 
     const filename = `setup_${safeOrgSlug}.bat`;
-    let backendUrl = process.env.PUBLIC_BACKEND_URL || config.backendUrl || 'https://api-streams.sam.co.ke';
-    if (backendUrl.includes('13.60.183.142') || backendUrl.includes(':5000')) {
-      backendUrl = 'https://api-streams.sam.co.ke';
-    }
+    const backendUrl = 'https://api-streams.sam.co.ke';
+    const dashboardUrl = 'https://vertextstreams.netlify.app';
 
     const content = `@echo off
 chcp 65001 >nul
@@ -60,8 +58,8 @@ if "%PROCESSOR_ARCHITECTURE%" neq "AMD64" if "%PROCESSOR_ARCHITEW6432%" neq "AMD
     echo [ERROR] Vertex SaaS Windows Agent requires a 64-bit x64 Windows OS.
     echo Architecture detected: %PROCESSOR_ARCHITECTURE%
     echo.
-    pause
-    exit /b 1
+    echo Window will stay open for diagnostics.
+    cmd /k
 )
 
 REM 3. Configure Target Directory
@@ -199,8 +197,8 @@ if exist "%SCRCPY_DIR%\\adb.exe" (
 ) else (
     echo [ERROR] adb.exe could not be found or installed.
     echo.
-    pause
-    exit /b 1
+    echo Window will stay open for diagnostics.
+    cmd /k
 )
 
 if exist "%SCRCPY_DIR%\\scrcpy.exe" (
@@ -219,8 +217,8 @@ if %errorLevel% equ 0 (
     echo [OK] Active ADB server process detected. Keeping existing daemon running without reset.
 ) else (
     echo [*] Starting ADB background service...
-    "%SCRCPY_DIR%\\adb.exe" start-server >nul 2>&1
-    echo [OK] ADB service started.
+    "%SCRCPY_DIR%\\adb.exe" devices >nul 2>&1
+    echo [OK] ADB service ready.
 )
 
 REM 6c. Check Cloudflare Tunnel (Idempotent: Never kill or reset if already active)
@@ -263,10 +261,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 if %errorLevel% neq 0 (
     echo.
+    echo ===============================================================================
     echo [ERROR] Agent enrollment failed. Please verify your internet connection.
+    echo Window will stay open for diagnostics.
+    echo ===============================================================================
     echo.
-    pause
-    exit /b 1
+    cmd /k
 )
 
 REM 8. Deploy & Start Real-time Streaming Agent Runner

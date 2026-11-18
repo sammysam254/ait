@@ -26,6 +26,6 @@ export const config = {
   },
 
   // URLs
-  backendUrl: process.env.BACKEND_URL || 'https://vertextstreams.sam.co.ke',
-  frontendUrl: process.env.FRONTEND_URL || 'https://vertextstreams.sam.co.ke',
+  backendUrl: process.env.BACKEND_URL || 'https://api-streams.sam.co.ke',
+  frontendUrl: process.env.FRONTEND_URL || 'https://vertextstreams.netlify.app',
 };
