@@ -441,19 +441,19 @@ function startStream(deviceId, targetSerial) {
 
   const deviceIdBuf = Buffer.from(deviceId, 'utf8');
 
-  // If capture pipeline is already running for this physical device serial, request fresh keyframe and reuse
+  // If capture pipeline is already running for this physical device serial, send cached keyframe and request fresh live keyframe
   if (activeStreams.has(serial)) {
+    const cached = cachedKeyframes.get(serial);
+    if (cached && ws && ws.readyState === 1) {
+      console.log(`[StreamBridge] ⚡ Immediate sync: pushing cached keyframe to viewer for ${serial}`);
+      ws.send(Buffer.concat([deviceIdBuf, cached]));
+    }
     const cSock = controlSockets.get(serial);
     if (cSock && !cSock.destroyed) {
       try {
         cSock.write(Buffer.from([17])); // SC_CONTROL_MSG_TYPE_RESET_VIDEO = 17
         console.log(`[StreamBridge] ⚡ Stream active; requested fresh live keyframe (RESET_VIDEO) for ${serial}`);
       } catch (e) {}
-    } else {
-      const cached = cachedKeyframes.get(serial);
-      if (cached && ws && ws.readyState === 1) {
-        ws.send(Buffer.concat([deviceIdBuf, cached]));
-      }
     }
     return;
   }
@@ -531,7 +531,7 @@ function startStream(deviceId, targetSerial) {
         let parsedHeader = false;
 
         sock.on('data', (chunk) => {
-          if (!active || !ws || ws.readyState !== 1) return;
+          if (!active) return;
           buf = Buffer.concat([buf, chunk]);
 
           if (!parsedHeader && buf.length >= 76) {
@@ -565,19 +565,23 @@ function startStream(deviceId, targetSerial) {
                 const fullKeyframe = cachedConfig ? Buffer.concat([cachedConfig, packetData]) : packetData;
                 cachedKeyframes.set(serial, fullKeyframe);
 
-                const devIds = serialToDeviceIds.get(serial);
-                if (devIds) {
-                  for (const dId of devIds) {
-                    ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), fullKeyframe]));
+                if (ws && ws.readyState === 1) {
+                  const devIds = serialToDeviceIds.get(serial);
+                  if (devIds) {
+                    for (const dId of devIds) {
+                      ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), fullKeyframe]));
+                    }
                   }
                 }
                 framesSent++;
               } else {
                 // Complete delta frame
-                const devIds = serialToDeviceIds.get(serial);
-                if (devIds) {
-                  for (const dId of devIds) {
-                    ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), packetData]));
+                if (ws && ws.readyState === 1) {
+                  const devIds = serialToDeviceIds.get(serial);
+                  if (devIds) {
+                    for (const dId of devIds) {
+                      ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), packetData]));
+                    }
                   }
                 }
                 framesSent++;
@@ -601,23 +605,41 @@ function startStream(deviceId, targetSerial) {
       }
 
       function setupAudioSocket(sock) {
-        let readStatus = false;
+        let buf = Buffer.alloc(0);
+        let parsedAudioHeader = false;
+
         sock.on('data', (chunk) => {
-          if (!active || !ws || ws.readyState !== 1) return;
-          let payload = chunk;
-          if (!readStatus && payload.length >= 4) {
-            payload = payload.subarray(4);
-            readStatus = true;
+          if (!active) return;
+          buf = Buffer.concat([buf, chunk]);
+
+          if (!parsedAudioHeader && buf.length >= 4) {
+            const codec = buf.subarray(0, 4).toString('utf8');
+            console.log(`[StreamBridge] 🔊 Scrcpy Audio Ready [codec: ${codec}]`);
+            buf = buf.subarray(4);
+            parsedAudioHeader = true;
           }
-          if (payload.length > 0) {
-            const devIds = serialToDeviceIds.get(serial);
-            if (devIds) {
-              for (const dId of devIds) {
-                ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), Buffer.from('AUD:'), payload]));
+
+          if (parsedAudioHeader) {
+            while (buf.length >= 12) {
+              const size = buf.readUInt32BE(8);
+              if (buf.length < 12 + size) {
+                break;
+              }
+              const audioData = buf.subarray(12, 12 + size);
+              buf = buf.subarray(12 + size);
+
+              if (ws && ws.readyState === 1 && audioData.length > 0) {
+                const devIds = serialToDeviceIds.get(serial);
+                if (devIds) {
+                  for (const dId of devIds) {
+                    ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), Buffer.from('AUD:'), audioData]));
+                  }
+                }
               }
             }
           }
         });
+
         sock.on('error', () => {});
       }
 

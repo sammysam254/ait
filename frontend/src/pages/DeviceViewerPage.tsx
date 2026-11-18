@@ -46,17 +46,24 @@ export const DeviceViewerPage: React.FC = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
 
-  // Play real-time raw PCM audio streamed from phone via scrcpy
-  const playPcmAudio = (rawBytes: Uint8Array) => {
+  // Initialize and resume AudioContext on user gesture
+  const initAudioCtx = () => {
     try {
       if (!audioCtxRef.current) {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         audioCtxRef.current = new AudioCtx({ sampleRate: 48000 });
       }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === 'suspended') {
-        ctx.resume();
+      if (audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume();
       }
+    } catch (e) {}
+  };
+
+  // Play real-time raw PCM audio streamed from phone via scrcpy
+  const playPcmAudio = (rawBytes: Uint8Array) => {
+    try {
+      if (!audioCtxRef.current || audioCtxRef.current.state !== 'running') return;
+      const ctx = audioCtxRef.current;
       let pcm = rawBytes;
       if (pcm.length > 44 && pcm[0] === 0x52 && pcm[1] === 0x49 && pcm[2] === 0x46 && pcm[3] === 0x46) {
         pcm = pcm.subarray(44);
@@ -297,6 +304,7 @@ export const DeviceViewerPage: React.FC = () => {
   const lastMoveSentRef = useRef(0);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    initAudioCtx();
     if (!canControl) return;
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
@@ -339,6 +347,7 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    initAudioCtx();
     if (!canControl || e.touches.length === 0) return;
     const touch = e.touches[0];
     const coords = getDeviceCoords(touch.clientX, touch.clientY);
@@ -437,9 +446,7 @@ export const DeviceViewerPage: React.FC = () => {
 
           <button
             onClick={() => {
-              if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-                audioCtxRef.current.resume();
-              }
+              initAudioCtx();
               setIsMuted(!isMuted);
             }}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
