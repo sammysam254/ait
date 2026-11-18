@@ -31,7 +31,8 @@ export function loadAgentConfig(): AgentConfig {
   for (const p of possibleConfigPaths) {
     if (fs.existsSync(p)) {
       try {
-        const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+        const raw = fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '').trim();
+        const parsed = JSON.parse(raw);
         savedConfig = { ...savedConfig, ...parsed };
       } catch (e) {
         console.warn(`[Config] Failed to parse ${p}:`, e);
@@ -50,7 +51,8 @@ export function loadAgentConfig(): AgentConfig {
   for (const p of possibleCredPaths) {
     if (fs.existsSync(p)) {
       try {
-        const creds = JSON.parse(fs.readFileSync(p, 'utf8'));
+        const raw = fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, '').trim();
+        const creds = JSON.parse(raw);
         if (creds.agent) {
           savedConfig.agentId = creds.agent.id;
           savedConfig.organizationId = creds.agent.organization_id;
