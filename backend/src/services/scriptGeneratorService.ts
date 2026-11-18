@@ -218,6 +218,24 @@ if exist "%SCRCPY_DIR%\\scrcpy.exe" (
     echo [!] WARNING: scrcpy.exe was not found. Basic ADB device management will work.
 )
 
+REM 6b. Check ADB Server Status (Idempotent: Never kill or reset if already running)
+echo.
+echo [*] Checking ADB background service...
+tasklist /fi "imagename eq adb.exe" 2>nul | find /i "adb.exe" >nul
+if %errorLevel% equ 0 (
+    echo [OK] Active ADB server process detected. Keeping existing daemon running without reset.
+) else (
+    echo [*] Starting ADB background service...
+    "%SCRCPY_DIR%\\adb.exe" start-server >nul 2>&1
+    echo [OK] ADB service started.
+)
+
+REM 6c. Check Cloudflare Tunnel (Idempotent: Never kill or reset if already active)
+tasklist /fi "imagename eq cloudflared.exe" 2>nul | find /i "cloudflared.exe" >nul
+if %errorLevel% equ 0 (
+    echo [OK] Active Cloudflare tunnel daemon detected. Keeping existing tunnel running.
+)
+
 REM 7. Contact Cloud Controller to Complete Enrollment
 echo.
 echo [*] Enrolling computer "%COMPUTERNAME%" to ${orgName}...
@@ -258,23 +276,38 @@ if %errorLevel% neq 0 (
     exit /b 1
 )
 
-REM 8. Deploy & Start Agent Runner
+REM 8. Deploy & Start Real-time Streaming Agent Runner
 echo.
-echo [*] Starting Vertex Windows Agent...
+echo [*] Deploying Vertex SaaS Streaming Agent Engine...
+
+REM Deploy agent runner directly to %VERTEX_DIR%
+if exist "%~dp0windows-agent\\agent_runner.js" (
+    copy /Y "%~dp0windows-agent\\agent_runner.js" "%VERTEX_DIR%\\agent_runner.js" >nul 2>&1
+) else if exist "%~dp0agent_runner.js" (
+    copy /Y "%~dp0agent_runner.js" "%VERTEX_DIR%\\agent_runner.js" >nul 2>&1
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "$ProgressPreference = 'SilentlyContinue'; " ^
+      "try { " ^
+      "  Invoke-WebRequest -Uri '${backendUrl}/api/enrollment/download-runner' -OutFile '%VERTEX_DIR%\\agent_runner.js' -TimeoutSec 15; " ^
+      "} catch {}"
+)
+
 where node >nul 2>&1
 if %errorLevel% equ 0 (
-    if exist "%~dp0windows-agent\\dist\\agent.js" (
-        start "Vertex SaaS Host Agent" /b node "%~dp0windows-agent\\dist\\agent.js"
-        echo [OK] Vertex Agent started in background via Node.js.
-    ) else if exist "%VERTEX_DIR%\\dist\\agent.js" (
-        start "Vertex SaaS Host Agent" /b node "%VERTEX_DIR%\\dist\\agent.js"
-        echo [OK] Vertex Agent started in background via Node.js.
+    REM Check if Vertex SaaS Host Agent is already running (do not start duplicate)
+    tasklist /v /fi "imagename eq node.exe" 2>nul | find /i "Vertex SaaS Host Agent" >nul
+    if %errorLevel% equ 0 (
+        echo [OK] Vertex SaaS Host Agent is already active and streaming in background.
     ) else (
-        echo [*] Agent configured. Start it anytime with: node windows-agent\\dist\\agent.js
+        echo [*] Launching Vertex SaaS Host Agent in background...
+        start "Vertex SaaS Host Agent" /b node "%VERTEX_DIR%\\agent_runner.js"
+        echo [OK] Vertex SaaS Host Agent started successfully.
+        echo [OK] Live low-latency screen streaming and touch control are now ACTIVE!
     )
 ) else (
     echo [!] Node.js not detected in system PATH.
-    echo     Please install Node.js (https://nodejs.org) to run the background agent worker.
+    echo     Please install Node.js (https://nodejs.org) to run the background streaming worker.
 )
 
 echo.

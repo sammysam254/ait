@@ -87,20 +87,32 @@ export const DeviceViewerPage: React.FC = () => {
       ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
     };
 
+    let frameCount = 0;
+    const streamPoller = setInterval(() => {
+      if (frameCount === 0 && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
+      }
+    }, 2000);
+
     ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === 'connection-established') {
             if (msg.canControl !== undefined) setCanControl(msg.canControl);
+            ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
           } else if (msg.type === 'device-offline') {
             setStatus('offline');
           }
         } catch (e) {}
       } else if (event.data instanceof ArrayBuffer) {
-        // Binary image stream from Android (PNG or JPEG)
-        const blob = new Blob([event.data], { type: 'image/png' });
+        frameCount++;
+        // Binary image stream from Android (auto-detect JPEG or PNG)
+        const bytes = new Uint8Array(event.data);
+        const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+        const blob = new Blob([event.data], { type: isJpeg ? 'image/jpeg' : 'image/png' });
         const img = new Image();
+        const url = URL.createObjectURL(blob);
         img.onload = () => {
           const canvas = canvasRef.current;
           if (canvas) {
@@ -113,18 +125,23 @@ export const DeviceViewerPage: React.FC = () => {
               ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             }
           }
-          URL.revokeObjectURL(img.src);
+          URL.revokeObjectURL(url);
         };
-        img.src = URL.createObjectURL(blob);
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+        };
+        img.src = url;
       }
     };
 
     ws.onerror = () => {
+      clearInterval(streamPoller);
       setStatus('error');
       setErrorMessage('Connection failed to cloud streaming gateway.');
     };
 
     ws.onclose = () => {
+      clearInterval(streamPoller);
       if (status !== 'error') {
         setStatus('offline');
       }
@@ -137,15 +154,17 @@ export const DeviceViewerPage: React.FC = () => {
     if (!canvas || !device) return null;
 
     const rect = canvas.getBoundingClientRect();
-    const scaleX = device.screen_width / rect.width;
-    const scaleY = device.screen_height / rect.height;
+    const targetWidth = canvas.width || device.screen_width || 720;
+    const targetHeight = canvas.height || device.screen_height || 1600;
+    const scaleX = targetWidth / rect.width;
+    const scaleY = targetHeight / rect.height;
 
     const x = (e.clientX - rect.left) * scaleX;
     const y = (e.clientY - rect.top) * scaleY;
 
     return {
-      x: Math.max(0, Math.min(device.screen_width, x)),
-      y: Math.max(0, Math.min(device.screen_height, y)),
+      x: Math.max(0, Math.min(targetWidth, x)),
+      y: Math.max(0, Math.min(targetHeight, y)),
     };
   };
 

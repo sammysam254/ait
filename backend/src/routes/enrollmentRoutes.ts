@@ -94,6 +94,28 @@ router.post('/enroll', (req: Request, res: Response) => {
   return res.json(result);
 });
 
+// GET /api/enrollment/download-runner - Serves the standalone agent_runner.js
+router.get('/download-runner', (req: Request, res: Response) => {
+  const candidates = [
+    path.resolve(__dirname, '../../windows-agent/agent_runner.js'),
+    path.resolve(process.cwd(), 'windows-agent/agent_runner.js'),
+    path.resolve(process.cwd(), '../windows-agent/agent_runner.js'),
+    path.resolve(__dirname, '../resources/agent_runner.js'),
+    path.resolve(process.cwd(), 'resources/agent_runner.js'),
+    path.resolve(process.cwd(), 'backend/resources/agent_runner.js'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="agent_runner.js"');
+      return fs.createReadStream(candidate).pipe(res);
+    }
+  }
+
+  return res.status(404).json({ error: 'agent_runner.js not found on server.' });
+});
+
 // GET /api/enrollment/download-scrcpy - Serves the official scrcpy 3.3.4 distribution
 router.get('/download-scrcpy', (req: Request, res: Response) => {
   // Check location of scrcpy zip
