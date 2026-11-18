@@ -71,7 +71,7 @@ router.post('/generate-new-token', authenticate, (req: Request, res: Response) =
 
 // POST /api/enrollment/enroll - Called by setup.bat on customer's Windows machine
 router.post('/enroll', (req: Request, res: Response) => {
-  const { token, computerName, osVersion, arch, ipAddress } = req.body;
+  const { token, organizationId, computerName, osVersion, arch, ipAddress } = req.body;
 
   if (!token) {
     return res.status(400).json({ success: false, error: 'Enrollment token is required.' });
@@ -81,6 +81,7 @@ router.post('/enroll', (req: Request, res: Response) => {
 
   const result = EnrollmentService.enrollAgent(token, {
     computerName: computerName || 'Windows Host',
+    organizationId,
     osVersion,
     arch,
     ipAddress: clientIp,

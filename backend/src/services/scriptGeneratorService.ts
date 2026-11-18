@@ -224,7 +224,7 @@ echo [*] Enrolling computer "%COMPUTERNAME%" to ${orgName}...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ProgressPreference = 'SilentlyContinue'; " ^
   "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " ^
-  "$body = @{ token = '${token}'; computerName = $env:COMPUTERNAME; osVersion = [System.Environment]::OSVersion.VersionString; arch = $env:PROCESSOR_ARCHITECTURE } | ConvertTo-Json; " ^
+  "$body = @{ token = '${token}'; organizationId = '${organizationId}'; computerName = $env:COMPUTERNAME; osVersion = [System.Environment]::OSVersion.VersionString; arch = $env:PROCESSOR_ARCHITECTURE } | ConvertTo-Json; " ^
   "try { " ^
   "  $resp = Invoke-RestMethod -Uri '${backendUrl}/api/enrollment/enroll' -Method POST -Body $body -ContentType 'application/json'; " ^
   "  if ($resp.success) { " ^
@@ -236,7 +236,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "    exit 1; " ^
   "  } " ^
   "} catch { " ^
-  "  [Console]::WriteLine('[ERROR] Failed to enroll with controller: ' + $_.Exception.Message); " ^
+  "  $errMsg = $_.Exception.Message; " ^
+  "  if ($_.Exception.Response) { " ^
+  "    try { " ^
+  "      $stream = $_.Exception.Response.GetResponseStream(); " ^
+  "      if ($stream) { " ^
+  "        $reader = New-Object System.IO.StreamReader($stream); " ^
+  "        $errMsg = $reader.ReadToEnd(); " ^
+  "      } " ^
+  "    } catch {} " ^
+  "  } " ^
+  "  [Console]::WriteLine('[ERROR] Failed to enroll with controller: ' + $errMsg); " ^
   "  exit 1; " ^
   "}"
 
