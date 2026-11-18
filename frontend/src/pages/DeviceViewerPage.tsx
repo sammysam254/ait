@@ -253,20 +253,55 @@ export const DeviceViewerPage: React.FC = () => {
     const distance = Math.hypot(deltaX, deltaY);
     const duration = Date.now() - start.time;
 
-    if (distance > 25) {
-      // Swipe gesture
+    if (distance > 15) {
+      // Natural kinetic swipe gesture
       sendInput('swipe', {
         startX: start.x,
         startY: start.y,
         endX: coords.x,
         endY: coords.y,
-        durationMs: Math.min(duration, 400),
+        durationMs: Math.max(120, Math.min(duration, 300)),
       });
     } else {
-      // Tap gesture
+      // Instant tap
       sendInput('tap', { x: coords.x, y: coords.y });
     }
 
+    touchStartPosRef.current = null;
+  };
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!canControl || e.touches.length === 0) return;
+    const touch = e.touches[0];
+    const coords = getDeviceCoords(touch.clientX, touch.clientY);
+    if (!coords) return;
+    isMouseDownRef.current = true;
+    touchStartPosRef.current = { x: coords.x, y: coords.y, time: Date.now() };
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!canControl || !isMouseDownRef.current || !touchStartPosRef.current) return;
+    isMouseDownRef.current = false;
+    const touch = e.changedTouches[0];
+    const coords = touch ? getDeviceCoords(touch.clientX, touch.clientY) : null;
+    const start = touchStartPosRef.current;
+    if (coords && start) {
+      const deltaX = coords.x - start.x;
+      const deltaY = coords.y - start.y;
+      const distance = Math.hypot(deltaX, deltaY);
+      const duration = Date.now() - start.time;
+      if (distance > 15) {
+        sendInput('swipe', {
+          startX: start.x,
+          startY: start.y,
+          endX: coords.x,
+          endY: coords.y,
+          durationMs: Math.max(120, Math.min(duration, 300)),
+        });
+      } else {
+        sendInput('tap', { x: coords.x, y: coords.y });
+      }
+    }
     touchStartPosRef.current = null;
   };
 
@@ -382,7 +417,9 @@ export const DeviceViewerPage: React.FC = () => {
             ref={overlayRef}
             onMouseDown={handleMouseDown}
             onMouseUp={handleMouseUp}
-            className={`absolute inset-0 z-10 ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
+            onTouchStart={handleTouchStart}
+            onTouchEnd={handleTouchEnd}
+            className={`absolute inset-0 z-10 select-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
           />
 
           {/* Overlay when not connected */}

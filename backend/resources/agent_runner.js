@@ -2,7 +2,7 @@
  * Standalone Vertex SaaS Host Agent Runner
  * Zero external dependencies: Uses built-in Node.js APIs (WebSocket, fetch, child_process, fs, path).
  */
-const { execFile, execSync } = require('child_process');
+const { execFile, execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -117,9 +117,33 @@ function captureScreenshot(serial) {
   });
 }
 
+// Persistent interactive ADB shell per device for 0ms instantaneous control response
+const shellSessions = new Map(); // serial -> ChildProcess
+
+function getDeviceShell(serial) {
+  let proc = shellSessions.get(serial);
+  if (!proc || proc.killed) {
+    proc = spawn(adbPath, ['-s', serial, 'shell'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    shellSessions.set(serial, proc);
+    proc.on('exit', () => shellSessions.delete(serial));
+  }
+  return proc;
+}
+
+function sendShellInput(serial, command) {
+  try {
+    const sh = getDeviceShell(serial);
+    sh.stdin.write(command + '\n');
+    return true;
+  } catch (e) {
+    execFile(adbPath, ['-s', serial, 'shell', command], () => {});
+    return false;
+  }
+}
+
 async function wakePhone(serial) {
   try {
-    await execAdb(['-s', serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
+    sendShellInput(serial, 'input keyevent 224'); // KEYCODE_WAKEUP
   } catch (e) {}
 }
 
@@ -129,87 +153,48 @@ async function injectInput(serial, action, data) {
       case 'tap': {
         const x = Math.round(data.x);
         const y = Math.round(data.y);
-        console.log(`[Input] 👉 Tap at (${x}, ${y}) on ${serial}`);
-        await execAdb(['-s', serial, 'shell', 'input', 'tap', x.toString(), y.toString()]);
+        console.log(`[Input] 👉 Instant Tap (${x}, ${y}) on ${serial}`);
+        sendShellInput(serial, `input tap ${x} ${y}`);
         return true;
       }
       case 'swipe': {
         const { startX, startY, endX, endY, durationMs } = data;
-        const dur = Math.round(durationMs || 250);
-        console.log(`[Input] 👆 Swipe from (${Math.round(startX)}, ${Math.round(startY)}) to (${Math.round(endX)}, ${Math.round(endY)}) [${dur}ms] on ${serial}`);
-        await execAdb(['-s', serial, 'shell', 'input', 'swipe',
-          Math.round(startX).toString(),
-          Math.round(startY).toString(),
-          Math.round(endX).toString(),
-          Math.round(endY).toString(),
-          dur.toString()
-        ]);
+        const dur = Math.max(100, Math.round(durationMs || 150));
+        console.log(`[Input] 👆 Smooth Swipe (${Math.round(startX)}, ${Math.round(startY)}) -> (${Math.round(endX)}, ${Math.round(endY)}) [${dur}ms] on ${serial}`);
+        sendShellInput(serial, `input swipe ${Math.round(startX)} ${Math.round(startY)} ${Math.round(endX)} ${Math.round(endY)} ${dur}`);
         return true;
       }
       case 'back':
         console.log(`[Input] ◀️ Key: BACK on ${serial}`);
-        await execAdb(['-s', serial, 'shell', 'input', 'keyevent', '4']);
+        sendShellInput(serial, 'input keyevent 4');
         return true;
       case 'home':
         console.log(`[Input] 🔘 Key: HOME on ${serial}`);
-        await execAdb(['-s', serial, 'shell', 'input', 'keyevent', '3']);
+        sendShellInput(serial, 'input keyevent 3');
         return true;
       case 'recents':
         console.log(`[Input] ⏹️ Key: RECENTS on ${serial}`);
-        await execAdb(['-s', serial, 'shell', 'input', 'keyevent', '187']);
+        sendShellInput(serial, 'input keyevent 187');
         return true;
       case 'rotate':
         const r = data && data.orientation === 'landscape' ? '1' : '0';
         console.log(`[Input] 🔄 Rotate: ${data && data.orientation === 'landscape' ? 'Landscape' : 'Portrait'} on ${serial}`);
-        await execAdb(['-s', serial, 'shell', 'settings', 'put', 'system', 'user_rotation', r]);
+        sendShellInput(serial, `settings put system user_rotation ${r}`);
         return true;
       case 'text':
         console.log(`[Input] ⌨️ Text: "${data.text}" on ${serial}`);
         const escaped = (data.text || '').replace(/([^\w])/g, '\\$1');
-        await execAdb(['-s', serial, 'shell', 'input', 'text', escaped]);
+        sendShellInput(serial, `input text ${escaped}`);
         return true;
       case 'key_event':
         console.log(`[Input] 🔘 Keycode: ${data.keyCode} on ${serial}`);
-        await execAdb(['-s', serial, 'shell', 'input', 'keyevent', data.keyCode.toString()]);
+        sendShellInput(serial, `input keyevent ${data.keyCode}`);
         return true;
     }
   } catch (e) {
     console.error(`[Agent] Error injecting ${action}:`, e.message);
   }
   return false;
-}
-
-// Native scrcpy 60 FPS launcher
-const launchedScrcpySerials = new Set();
-
-function launchScrcpyWindow(serial, deviceName) {
-  if (launchedScrcpySerials.has(serial)) return;
-  const scrcpyCandidates = [
-    path.join(agentDir, 'scrcpy', 'scrcpy.exe'),
-    path.join(__dirname, 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
-    path.join(process.cwd(), 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
-    'scrcpy.exe'
-  ];
-  let exe = '';
-  for (const c of scrcpyCandidates) {
-    if (fs.existsSync(c)) { exe = c; break; }
-  }
-  if (!exe) return;
-
-  try {
-    const title = `Vertex SaaS - ${deviceName || serial} (60 FPS Native)`;
-    const p = execFile(exe, ['-s', serial, '--stay-awake', '--window-title', title], {
-      windowsHide: false,
-      detached: true,
-      stdio: 'ignore'
-    });
-    p.unref();
-    launchedScrcpySerials.add(serial);
-    console.log(`[Scrcpy] ⚡ Launched native 60 FPS hardware window for ${deviceName || serial}`);
-    p.on('exit', () => {
-      launchedScrcpySerials.delete(serial);
-    });
-  } catch (e) {}
 }
 
 // Discovered devices & streaming loops
@@ -311,63 +296,84 @@ function startStream(deviceId, serial) {
     return;
   }
 
+  const deviceIdBuf = Buffer.from(deviceId, 'utf8');
+
   if (activeStreams.has(deviceId)) {
     const cached = cachedHeaders.get(deviceId);
     if (cached && ws && ws.readyState === 1) {
-      console.log(`[StreamBridge] ⚡ Immediate sync: pushing cached keyframe header to viewer for ${serial}`);
-      const tagged = Buffer.concat([Buffer.from(deviceId, 'utf8'), cached]);
-      ws.send(tagged);
+      console.log(`[StreamBridge] ⚡ Immediate sync: pushing cached keyframe to viewer for ${serial}`);
+      ws.send(Buffer.concat([deviceIdBuf, cached]));
     }
     return;
   }
 
-  console.log(`[StreamBridge] 🚀 Starting live ws-scrcpy hardware stream for ${deviceId} (${serial})...`);
+  console.log(`[StreamBridge] 🚀 Starting clean 60 FPS hardware stream for ${deviceId} (${serial})...`);
   wakePhone(serial);
 
   let active = true;
   let screenrecordProc = null;
   let framesSent = 0;
   let lastStatsTime = Date.now();
+  let nalBuffer = Buffer.alloc(0);
 
   const startH264Pipeline = () => {
     if (!active) return;
     try {
-      screenrecordProc = execFile(adbPath, [
+      nalBuffer = Buffer.alloc(0);
+      screenrecordProc = spawn(adbPath, [
         '-s', serial,
         'exec-out',
         'screenrecord',
         '--output-format=h264',
         '--size', '720x1600',
-        '--bit-rate', '4000000',
+        '--bit-rate', '6000000',
         '--time-limit', '0',
         '-'
-      ], { encoding: 'buffer', maxBuffer: 100 * 1024 * 1024 });
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
 
       screenrecordProc.stdout.on('data', (chunk) => {
         if (!active || !ws || ws.readyState !== 1) return;
-        if (ws.bufferedAmount && ws.bufferedAmount > 512 * 1024) return;
 
-        // Detect SPS/PPS config packet (starts with 00 00 00 01 67 or 00 00 01 67)
-        for (let i = 0; i < Math.min(chunk.length - 4, 32); i++) {
-          if (chunk[i] === 0x00 && chunk[i + 1] === 0x00 && (chunk[i + 2] === 0x01 || (chunk[i + 2] === 0x00 && chunk[i + 3] === 0x01))) {
-            const nalType = (chunk[i + 2] === 0x01 ? chunk[i + 3] : chunk[i + 4]) & 0x1f;
-            if (nalType === 7) {
-              cachedHeaders.set(deviceId, chunk);
-              break;
+        nalBuffer = Buffer.concat([nalBuffer, chunk]);
+
+        // Find Annex B start codes: 00 00 00 01 (4 bytes) or 00 00 01 (3 bytes)
+        const startOffsets = [];
+        for (let i = 0; i <= nalBuffer.length - 4; i++) {
+          if (nalBuffer[i] === 0x00 && nalBuffer[i + 1] === 0x00) {
+            if (nalBuffer[i + 2] === 0x01) {
+              startOffsets.push(i);
+            } else if (nalBuffer[i + 2] === 0x00 && nalBuffer[i + 3] === 0x01) {
+              startOffsets.push(i);
+              i++;
             }
           }
         }
 
-        const tagged = Buffer.concat([Buffer.from(deviceId, 'utf8'), chunk]);
-        ws.send(tagged);
-        framesSent++;
+        // When we have at least 2 boundaries, slice and emit complete NAL units
+        if (startOffsets.length >= 2) {
+          for (let k = 0; k < startOffsets.length - 1; k++) {
+            const start = startOffsets[k];
+            const end = startOffsets[k + 1];
+            const completeNal = nalBuffer.subarray(start, end);
 
-        const now = Date.now();
-        if (now - lastStatsTime >= 3000) {
-          const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
-          console.log(`[Stream] ⚡ ws-scrcpy 60 FPS hardware stream: ~${fps} FPS | ${Math.round(chunk.length / 1024)} KB chunk (${serial})`);
-          framesSent = 0;
-          lastStatsTime = now;
+            // Check if this is an SPS / PPS config unit or Keyframe
+            const nalType = (completeNal[2] === 0x01 ? completeNal[3] : completeNal[4]) & 0x1f;
+            if (nalType === 7 || nalType === 8 || nalType === 5) {
+              cachedHeaders.set(deviceId, completeNal);
+            }
+
+            ws.send(Buffer.concat([deviceIdBuf, completeNal]));
+            framesSent++;
+          }
+          nalBuffer = nalBuffer.subarray(startOffsets[startOffsets.length - 1]);
+
+          const now = Date.now();
+          if (now - lastStatsTime >= 3000) {
+            const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
+            console.log(`[Stream] ⚡ ws-scrcpy clean 60 FPS hardware stream: ~${fps} FPS | ${serial}`);
+            framesSent = 0;
+            lastStatsTime = now;
+          }
         }
       });
 
@@ -483,14 +489,12 @@ async function discoverAndSync() {
 
     loggedNoDevices = false;
 
-    // Log newly detected devices & launch scrcpy native window
+    // Log newly detected devices
     for (const d of devices) {
       if (!knownSerials.has(d.adbSerial)) {
         console.log(`[Device] 📱 Discovered: ${d.deviceName} (${d.adbSerial}) [${d.screenWidth}x${d.screenHeight}]`);
         knownSerials.add(d.adbSerial);
       }
-      // Auto-launch native hardware 60 FPS scrcpy window
-      launchScrcpyWindow(d.adbSerial, d.deviceName);
     }
 
     if (config.agentId) {
