@@ -20,6 +20,7 @@ interface ClientSession {
 export class SignalingServer {
   private wss: WebSocketServer;
   private deviceRooms: Map<string, { agent?: ClientSession; viewers: Set<ClientSession>; lastHeader?: Buffer }> = new Map();
+  private connectedAgents: Set<ClientSession> = new Set();
 
   constructor(server: HttpServer) {
     this.wss = new WebSocketServer({ server, path: '/ws' });
@@ -157,6 +158,7 @@ export class SignalingServer {
   }
 
   private handleAgentConnection(session: ClientSession) {
+    this.connectedAgents.add(session);
     console.log(`[SignalingServer] Agent connected: ${session.agentId} (Org: ${session.organizationId})`);
 
     session.ws.on('message', (data: Buffer | string) => {
@@ -182,29 +184,23 @@ export class SignalingServer {
             ((videoPayload[0] === 0x00 && videoPayload[1] === 0x00 && videoPayload[2] === 0x00 && videoPayload[3] === 0x01 && (videoPayload[4] & 0x1f) === 7) ||
              (videoPayload[0] === 0x00 && videoPayload[1] === 0x00 && videoPayload[2] === 0x01 && (videoPayload[3] & 0x1f) === 7)));
 
-          if (targetDeviceId) {
-            const room = this.getRoom(targetDeviceId);
-            room.agent = session;
-            if (isConfig) {
-              room.lastHeader = videoPayload;
-            }
-            for (const viewer of room.viewers) {
-              if (viewer.ws.readyState === WebSocket.OPEN) {
-                viewer.ws.send(videoPayload);
+          // Find serial associated with targetDeviceId
+          const dev = targetDeviceId ? inMemoryDb.devices.get(targetDeviceId) : null;
+          const serial = dev ? dev.adb_serial : '';
+
+          let forwarded = 0;
+          for (const [rDevId, r] of this.deviceRooms.entries()) {
+            const rDev = inMemoryDb.devices.get(rDevId);
+            const matches = (rDevId === targetDeviceId) || (serial && rDev && rDev.adb_serial === serial);
+            if (matches || (!targetDeviceId && r.viewers.size > 0)) {
+              r.agent = session;
+              if (isConfig) {
+                r.lastHeader = videoPayload;
               }
-            }
-          } else {
-            // Forward to active viewers in rooms owned by this agent
-            for (const [devId, room] of this.deviceRooms.entries()) {
-              if ((room.agent === session || !room.agent) && room.viewers.size > 0) {
-                if (!room.agent) room.agent = session;
-                if (isConfig) {
-                  room.lastHeader = videoPayload;
-                }
-                for (const viewer of room.viewers) {
-                  if (viewer.ws.readyState === WebSocket.OPEN) {
-                    viewer.ws.send(videoPayload);
-                  }
+              for (const viewer of r.viewers) {
+                if (viewer.ws.readyState === WebSocket.OPEN) {
+                  viewer.ws.send(videoPayload);
+                  forwarded++;
                 }
               }
             }
@@ -223,12 +219,12 @@ export class SignalingServer {
             room.agent = session;
             DeviceService.updateStatus(deviceId, 'online');
             session.ws.send(JSON.stringify({ type: 'registered', deviceId, success: true }));
-            console.log(`[SignalingServer] Agent registered producer for device ${deviceId}`);
+            console.log(`[SignalingServer] Agent registered producer for device ${deviceId} (serial: ${msg.serial || 'unknown'})`);
 
             // If viewers are already in the room, immediately initiate the stream
             if (room.viewers.size > 0) {
               const dev = inMemoryDb.devices.get(deviceId);
-              const serial = dev ? dev.adb_serial : '';
+              const serial = dev ? dev.adb_serial : (msg.serial || '');
               session.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
               DeviceService.updateStatus(deviceId, 'streaming');
               for (const viewer of room.viewers) {
@@ -277,6 +273,7 @@ export class SignalingServer {
     });
 
     session.ws.on('close', () => {
+      this.connectedAgents.delete(session);
       console.log(`[SignalingServer] Agent disconnected: ${session.agentId}`);
       if (session.deviceId) {
         const room = this.getRoom(session.deviceId);
@@ -295,7 +292,20 @@ export class SignalingServer {
     const room = this.getRoom(deviceId);
     room.viewers.add(session);
 
-    console.log(`[SignalingServer] Viewer joined device ${deviceId} (CanControl: ${session.canControl})`);
+    const dev = inMemoryDb.devices.get(deviceId);
+    const serial = dev ? dev.adb_serial : '';
+
+    // If room has no active agent assigned, bind the first available connected agent
+    if (!room.agent || room.agent.ws.readyState !== WebSocket.OPEN) {
+      for (const ag of this.connectedAgents) {
+        if (ag.ws.readyState === WebSocket.OPEN) {
+          room.agent = ag;
+          break;
+        }
+      }
+    }
+
+    console.log(`[SignalingServer] Viewer joined device ${deviceId} (Serial: ${serial}, AgentOnline: ${!!room.agent}, CanControl: ${session.canControl})`);
 
     // Notify viewer of current status & permission capabilities
     session.ws.send(JSON.stringify({
@@ -311,24 +321,24 @@ export class SignalingServer {
       session.ws.send(room.lastHeader);
     }
 
-    if (room.agent && room.agent.ws.readyState === WebSocket.OPEN) {
-      // Request agent to start or refresh stream for this device
-      const dev = inMemoryDb.devices.get(deviceId);
-      const serial = dev ? dev.adb_serial : '';
-      room.agent.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
+    // Always request stream from available agent
+    const activeAgent = (room.agent && room.agent.ws.readyState === WebSocket.OPEN) ? room.agent : Array.from(this.connectedAgents).find(a => a.ws.readyState === WebSocket.OPEN);
+    if (activeAgent) {
+      room.agent = activeAgent;
+      activeAgent.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
       DeviceService.updateStatus(deviceId, 'streaming');
     }
 
     session.ws.on('message', (data: string) => {
       try {
         const msg = JSON.parse(data.toString());
+        const agentSession = (room.agent && room.agent.ws.readyState === WebSocket.OPEN) ? room.agent : Array.from(this.connectedAgents).find(a => a.ws.readyState === WebSocket.OPEN);
 
         switch (msg.type) {
           case 'request-stream': {
-            if (room.agent && room.agent.ws.readyState === WebSocket.OPEN) {
-              const dev = inMemoryDb.devices.get(deviceId);
-              const serial = dev ? dev.adb_serial : '';
-              room.agent.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
+            if (agentSession) {
+              room.agent = agentSession;
+              agentSession.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
               DeviceService.updateStatus(deviceId, 'streaming');
             }
             break;
@@ -345,11 +355,13 @@ export class SignalingServer {
             }
 
             // Forward verified input event to agent (which translates it to scrcpy control protocol)
-            if (room.agent && room.agent.ws.readyState === WebSocket.OPEN) {
-              room.agent.ws.send(JSON.stringify({
+            if (agentSession) {
+              room.agent = agentSession;
+              agentSession.ws.send(JSON.stringify({
                 type: 'control-input',
                 deviceId,
-                action: msg.action, // 'touch_down', 'touch_up', 'touch_move', 'key_event', 'text', 'back', 'home', 'recents', 'rotate'
+                serial,
+                action: msg.action,
                 data: msg.data,
               }));
             }
@@ -360,8 +372,8 @@ export class SignalingServer {
           case 'webrtc-answer':
           case 'ice-candidate': {
             // Forward viewer signaling to the agent
-            if (room.agent && room.agent.ws.readyState === WebSocket.OPEN) {
-              room.agent.ws.send(JSON.stringify(msg));
+            if (agentSession) {
+              agentSession.ws.send(JSON.stringify(msg));
             }
             break;
           }

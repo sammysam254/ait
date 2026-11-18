@@ -80,6 +80,25 @@ console.log('[Agent] Cloud Controller Host:', config.backendUrl);
 console.log('[Agent] Enrolled Agent ID   :', config.agentId || 'Waiting for enrollment...');
 console.log('[Agent] Organization ID     :', config.organizationId);
 
+// Locate Scrcpy executable
+function findScrcpy() {
+  const candidates = [
+    path.join(agentDir, 'scrcpy', 'scrcpy.exe'),
+    path.join(__dirname, 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
+    path.join(__dirname, '..', 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
+    path.join(process.cwd(), 'resources', 'scrcpy-win64-v3.3.4', 'scrcpy.exe'),
+    'scrcpy.exe',
+  ];
+
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+const scrcpyPath = findScrcpy();
+console.log('[Agent] Scrcpy Executable    :', scrcpyPath || 'Not found');
+
 // Locate ADB
 function findAdb() {
   const candidates = [
@@ -199,8 +218,10 @@ async function injectInput(serial, action, data) {
 
 // Discovered devices & streaming loops
 let registeredDevices = new Map(); // deviceId -> serial
-let activeStreams = new Map(); // deviceId -> { stop, serial }
-let cachedHeaders = new Map(); // deviceId -> Buffer
+let deviceIdToSerial = new Map();  // deviceId -> serial
+let serialToDeviceIds = new Map(); // serial -> Set<deviceId>
+let activeStreams = new Map();     // serial -> { stop, serial }
+let cachedKeyframes = new Map();   // serial -> Buffer
 let ws = null;
 let isReconnecting = false;
 
@@ -226,6 +247,11 @@ function connectWebSocket() {
       for (const [devId, ser] of registeredDevices.entries()) {
         console.log(`[StreamBridge] Registering device producer: ${devId} (${ser})`);
         ws.send(JSON.stringify({ type: 'agent-register-device', deviceId: devId, serial: ser }));
+
+        const cached = cachedKeyframes.get(ser);
+        if (cached && ws.readyState === 1) {
+          ws.send(Buffer.concat([Buffer.from(devId, 'utf8'), cached]));
+        }
       }
     };
 
@@ -266,7 +292,7 @@ async function handleMessage(msg) {
   switch (msg.type) {
     case 'start-stream': {
       const { deviceId, serial } = msg;
-      const targetSerial = serial || registeredDevices.get(deviceId) || '';
+      const targetSerial = serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || '';
       console.log(`[StreamBridge] 📺 Received start-stream request for device: ${deviceId} (${targetSerial})`);
       startStream(deviceId, targetSerial);
       break;
@@ -275,13 +301,12 @@ async function handleMessage(msg) {
     case 'idle-stream': {
       const { deviceId } = msg;
       console.log(`[StreamBridge] ⏸️ Received idle-stream request for device: ${deviceId}`);
-      stopStream(deviceId);
       break;
     }
 
     case 'control-input': {
       const { deviceId, action, data } = msg;
-      const serial = registeredDevices.get(deviceId) || (activeStreams.get(deviceId) ? activeStreams.get(deviceId).serial : '');
+      const serial = msg.serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || '';
       if (serial) {
         await injectInput(serial, action, data);
       }
@@ -290,16 +315,24 @@ async function handleMessage(msg) {
   }
 }
 
-function startStream(deviceId, serial) {
+function startStream(deviceId, targetSerial) {
+  const serial = targetSerial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId);
   if (!serial) {
     console.warn(`[StreamBridge] Cannot start stream for ${deviceId}: no serial mapped.`);
     return;
   }
 
+  deviceIdToSerial.set(deviceId, serial);
+  if (!serialToDeviceIds.has(serial)) {
+    serialToDeviceIds.set(serial, new Set());
+  }
+  serialToDeviceIds.get(serial).add(deviceId);
+
   const deviceIdBuf = Buffer.from(deviceId, 'utf8');
 
-  if (activeStreams.has(deviceId)) {
-    const cached = cachedHeaders.get(deviceId);
+  // If capture pipeline is already running for this physical device serial, push cached keyframe and reuse
+  if (activeStreams.has(serial)) {
+    const cached = cachedKeyframes.get(serial);
     if (cached && ws && ws.readyState === 1) {
       console.log(`[StreamBridge] ⚡ Immediate sync: pushing cached keyframe to viewer for ${serial}`);
       ws.send(Buffer.concat([deviceIdBuf, cached]));
@@ -312,9 +345,12 @@ function startStream(deviceId, serial) {
 
   let active = true;
   let screenrecordProc = null;
+  let audioProc = null;
   let framesSent = 0;
   let lastStatsTime = Date.now();
   let nalBuffer = Buffer.alloc(0);
+  let currentSps = null;
+  let currentPps = null;
 
   const startH264Pipeline = () => {
     if (!active) return;
@@ -326,7 +362,7 @@ function startStream(deviceId, serial) {
         'screenrecord',
         '--output-format=h264',
         '--size', '720x1600',
-        '--bit-rate', '6000000',
+        '--bit-rate', '8000000',
         '--time-limit', '0',
         '-'
       ], { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -356,14 +392,38 @@ function startStream(deviceId, serial) {
             const end = startOffsets[k + 1];
             const completeNal = nalBuffer.subarray(start, end);
 
-            // Check if this is an SPS / PPS config unit or Keyframe
+            // Check NAL type
             const nalType = (completeNal[2] === 0x01 ? completeNal[3] : completeNal[4]) & 0x1f;
-            if (nalType === 7 || nalType === 8 || nalType === 5) {
-              cachedHeaders.set(deviceId, completeNal);
-            }
 
-            ws.send(Buffer.concat([deviceIdBuf, completeNal]));
-            framesSent++;
+            if (nalType === 7) {
+              currentSps = completeNal;
+            } else if (nalType === 8) {
+              currentPps = completeNal;
+            } else if (nalType === 5) {
+              // IDR Keyframe: Combine SPS + PPS + IDR into a single atomic keyframe
+              let fullKeyframe = completeNal;
+              if (currentSps && currentPps) {
+                fullKeyframe = Buffer.concat([currentSps, currentPps, completeNal]);
+              }
+              cachedKeyframes.set(serial, fullKeyframe);
+
+              const devIds = serialToDeviceIds.get(serial);
+              if (devIds) {
+                for (const dId of devIds) {
+                  ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), fullKeyframe]));
+                }
+              }
+              framesSent++;
+            } else {
+              // Delta frame (P-frame slice or other NAL)
+              const devIds = serialToDeviceIds.get(serial);
+              if (devIds) {
+                for (const dId of devIds) {
+                  ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), completeNal]));
+                }
+              }
+              framesSent++;
+            }
           }
           nalBuffer = nalBuffer.subarray(startOffsets[startOffsets.length - 1]);
 
@@ -394,11 +454,42 @@ function startStream(deviceId, serial) {
 
   startH264Pipeline();
 
-  activeStreams.set(deviceId, {
+  // Headless audio capture via scrcpy (zero popup desktop window)
+  const scrcpyBin = findScrcpy();
+  if (scrcpyBin) {
+    try {
+      audioProc = spawn(scrcpyBin, [
+        '-s', serial,
+        '--no-video',
+        '--no-playback',
+        '--audio-codec=raw',
+        '--record=-',
+        '--record-format=wav'
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+
+      audioProc.stdout.on('data', (audioChunk) => {
+        if (!active || !ws || ws.readyState !== 1) return;
+        const devIds = serialToDeviceIds.get(serial);
+        if (devIds) {
+          for (const dId of devIds) {
+            // Prefix audio packets with 'AUD:' + deviceId (36 chars)
+            ws.send(Buffer.concat([Buffer.from('AUD:' + dId, 'utf8'), audioChunk]));
+          }
+        }
+      });
+
+      audioProc.on('error', () => {});
+    } catch (e) {}
+  }
+
+  activeStreams.set(serial, {
     stop: () => {
       active = false;
       if (screenrecordProc) {
         try { screenrecordProc.kill(); } catch (e) {}
+      }
+      if (audioProc) {
+        try { audioProc.kill(); } catch (e) {}
       }
     },
     serial
@@ -406,19 +497,23 @@ function startStream(deviceId, serial) {
 }
 
 function stopStream(deviceId) {
-  const stream = activeStreams.get(deviceId);
-  if (stream) {
-    if (stream.stop) stream.stop();
-    else if (stream.interval) clearInterval(stream.interval);
-    activeStreams.delete(deviceId);
-    console.log(`[StreamBridge] Stopped stream for device: ${deviceId}`);
+  const serial = deviceIdToSerial.get(deviceId);
+  if (serial) {
+    const stream = activeStreams.get(serial);
+    if (stream) {
+      if (stream.stop) stream.stop();
+      activeStreams.delete(serial);
+      console.log(`[StreamBridge] Stopped stream for device: ${deviceId} (${serial})`);
+    }
   }
 }
 
 function stopAllStreams() {
-  for (const deviceId of activeStreams.keys()) {
-    stopStream(deviceId);
+  for (const serial of activeStreams.keys()) {
+    const stream = activeStreams.get(serial);
+    if (stream && stream.stop) stream.stop();
   }
+  activeStreams.clear();
 }
 
 // Device discovery & Cloud Sync
@@ -518,6 +613,12 @@ async function discoverAndSync() {
               console.log(`[Device] ☁️ Synced with Cloud Fleet: ${d.device_name} (ID: ${devId})`);
             }
             registeredDevices.set(devId, ser);
+            deviceIdToSerial.set(devId, ser);
+            if (!serialToDeviceIds.has(ser)) {
+              serialToDeviceIds.set(ser, new Set());
+            }
+            serialToDeviceIds.get(ser).add(devId);
+
             if (ws && ws.readyState === 1) {
               ws.send(JSON.stringify({
                 type: 'agent-register-device',
@@ -526,11 +627,11 @@ async function discoverAndSync() {
               }));
             }
 
-            // Immediately initiate screen stream without waiting for server request
-            if (!activeStreams.has(devId)) {
+            // Initiate or map screen stream for this device serial
+            if (!activeStreams.has(ser)) {
               console.log(`[StreamBridge] 🚀 Auto-starting video stream for ${d.device_name} (${ser})...`);
-              startStream(devId, ser);
             }
+            startStream(devId, ser);
           }
         }
       } else {

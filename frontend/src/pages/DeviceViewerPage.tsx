@@ -15,6 +15,7 @@ import {
   Wifi,
   PowerOff,
   Volume2,
+  VolumeX,
   Keyboard,
   Info,
 } from 'lucide-react';
@@ -35,6 +36,7 @@ export const DeviceViewerPage: React.FC = () => {
   const [latency, setLatency] = useState(24);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [quality, setQuality] = useState<'high' | 'medium' | 'low'>('high');
+  const [isMuted, setIsMuted] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -42,6 +44,41 @@ export const DeviceViewerPage: React.FC = () => {
   const jmuxerRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+
+  // Play real-time raw PCM audio streamed from phone via scrcpy
+  const playPcmAudio = (rawBytes: Uint8Array) => {
+    try {
+      if (!audioCtxRef.current) {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        audioCtxRef.current = new AudioCtx({ sampleRate: 48000 });
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+      let pcm = rawBytes;
+      if (pcm.length > 44 && pcm[0] === 0x52 && pcm[1] === 0x49 && pcm[2] === 0x46 && pcm[3] === 0x46) {
+        pcm = pcm.subarray(44);
+      }
+      const int16 = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 2));
+      if (int16.length === 0) return;
+      const channels = 2;
+      const frameCount = Math.floor(int16.length / channels);
+      if (frameCount === 0) return;
+      const audioBuf = ctx.createBuffer(channels, frameCount, 48000);
+      const left = audioBuf.getChannelData(0);
+      const right = audioBuf.getChannelData(1);
+      for (let i = 0; i < frameCount; i++) {
+        left[i] = int16[i * 2] / 32768.0;
+        right[i] = int16[i * 2 + 1] / 32768.0;
+      }
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuf;
+      source.connect(ctx.destination);
+      source.start();
+    } catch (e) {}
+  };
 
   // Touch tracking for gestures/drag
   const isMouseDownRef = useRef(false);
@@ -94,7 +131,7 @@ export const DeviceViewerPage: React.FC = () => {
         jmuxerRef.current = new JMuxer({
           node: videoRef.current,
           mode: 'video',
-          flushingTime: 0,
+          flushingTime: 25,
           fps: 60,
           clearBuffer: true,
           debug: false,
@@ -145,6 +182,14 @@ export const DeviceViewerPage: React.FC = () => {
         }
 
         const bytes = new Uint8Array(event.data);
+
+        // Auto-detect live audio packet prefixed with 'AUD:' (0x41 0x55 0x44 0x3a)
+        if (bytes.length > 4 && bytes[0] === 0x41 && bytes[1] === 0x55 && bytes[2] === 0x44 && bytes[3] === 0x3a) {
+          if (!isMuted) {
+            playPcmAudio(bytes.subarray(4));
+          }
+          return;
+        }
 
         // Auto-detect JPEG / PNG fallback
         if ((bytes[0] === 0xff && bytes[1] === 0xd8) || (bytes[0] === 0x89 && bytes[1] === 0x50)) {
@@ -368,6 +413,24 @@ export const DeviceViewerPage: React.FC = () => {
               </button>
             ))}
           </div>
+
+          <button
+            onClick={() => {
+              if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+                audioCtxRef.current.resume();
+              }
+              setIsMuted(!isMuted);
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+              !isMuted
+                ? 'bg-blue-600/30 text-blue-400 border border-blue-500/40 shadow-lg shadow-blue-500/20'
+                : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700'
+            }`}
+            title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+          >
+            {!isMuted ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+            <span>{!isMuted ? 'Audio: LIVE' : 'Audio: MUTED'}</span>
+          </button>
 
           <button
             onClick={() => setCanControl(!canControl)}
