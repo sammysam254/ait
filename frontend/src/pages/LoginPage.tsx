@@ -98,41 +98,23 @@ export const LoginPage: React.FC = () => {
             </button>
           </form>
 
-          {/* Quick Demo Personas */}
+          {/* Super Admin Quick Access */}
           <div className="pt-4 border-t border-gray-800 space-y-2">
-            <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider text-center">
-              One-Click Instant Test Personas
-            </div>
-            <div className="grid grid-cols-2 gap-2 text-[11px]">
-              <button
-                onClick={() => handleQuickLogin('customerA@enterprise.local')}
-                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-left text-gray-200 transition"
-              >
-                <div className="font-bold text-indigo-400">Customer A</div>
-                <div className="text-[10px] text-gray-400 truncate">customerA@enterprise.local</div>
-              </button>
-              <button
-                onClick={() => handleQuickLogin('customerB@fintech.local')}
-                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-left text-gray-200 transition"
-              >
-                <div className="font-bold text-indigo-400">Customer B</div>
-                <div className="text-[10px] text-gray-400 truncate">customerB@fintech.local</div>
-              </button>
-              <button
-                onClick={() => handleQuickLogin('assigned.user@partner.local')}
-                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-left text-gray-200 transition"
-              >
-                <div className="font-bold text-amber-400">Assigned User</div>
-                <div className="text-[10px] text-gray-400 truncate">Subordinate Tester</div>
-              </button>
-              <button
-                onClick={() => handleQuickLogin('admin@vertex-saas.local')}
-                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-left text-gray-200 transition"
-              >
-                <div className="font-bold text-purple-400">Super Admin</div>
-                <div className="text-[10px] text-gray-400 truncate">Platform Admin</div>
-              </button>
-            </div>
+            <button
+              onClick={() => handleQuickLogin('sammyseth260@gmail.com')}
+              className="w-full p-2.5 rounded-xl bg-indigo-950/40 border border-indigo-500/30 hover:border-indigo-500/60 text-left text-gray-200 transition flex items-center justify-between"
+            >
+              <div>
+                <div className="font-bold text-xs text-indigo-400 flex items-center gap-1.5">
+                  <Shield className="h-3.5 w-3.5" />
+                  <span>Platform Super Admin</span>
+                </div>
+                <div className="text-[11px] text-gray-400">sammyseth260@gmail.com</div>
+              </div>
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300">
+                Auto-Login
+              </span>
+            </button>
           </div>
         </div>
 

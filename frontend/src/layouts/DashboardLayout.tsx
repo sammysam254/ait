@@ -101,58 +101,19 @@ export const DashboardLayout: React.FC = () => {
           </nav>
         </div>
 
-        {/* User Card & Demo Persona Switcher */}
+        {/* User Card */}
         <div className="pt-4 border-t border-gray-800/80 space-y-2">
-          {/* Quick Persona Switcher for Instant Acceptance Testing */}
-          <div className="relative">
-            <button
-              onClick={() => setPersonaMenuOpen(!personaMenuOpen)}
-              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-gray-800/70 border border-gray-700/60 text-xs text-gray-300 hover:bg-gray-800 hover:text-white transition"
-              title="Switch user account to test tenant isolation and RBAC"
-            >
-              <span className="flex items-center gap-1.5 truncate">
-                <Zap className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                <span className="truncate">Persona: {user?.role}</span>
+          {isAdmin && (
+            <div className="px-2.5 py-1.5 rounded-lg bg-purple-950/40 border border-purple-500/30 text-xs text-purple-300 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 font-semibold">
+                <ShieldCheck className="h-3.5 w-3.5 text-purple-400" />
+                <span>Super Admin</span>
               </span>
-              <ChevronDown className="h-3 w-3 shrink-0" />
-            </button>
-
-            {personaMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-1 w-full bg-gray-900 border border-gray-800 rounded-lg shadow-2xl p-1 z-50 text-xs space-y-0.5">
-                <div className="px-2 py-1 text-[10px] uppercase font-semibold text-gray-500">
-                  Switch Test Persona
-                </div>
-                <button
-                  onClick={() => { switchAccountDemo('customerA@enterprise.local'); setPersonaMenuOpen(false); }}
-                  className="w-full text-left px-2 py-1.5 rounded hover:bg-indigo-600/20 hover:text-indigo-300 transition flex items-center justify-between"
-                >
-                  <span>Customer A (Owner)</span>
-                  {user?.email.includes('customerA') && <span className="text-[10px] text-emerald-400">active</span>}
-                </button>
-                <button
-                  onClick={() => { switchAccountDemo('customerB@fintech.local'); setPersonaMenuOpen(false); }}
-                  className="w-full text-left px-2 py-1.5 rounded hover:bg-indigo-600/20 hover:text-indigo-300 transition flex items-center justify-between"
-                >
-                  <span>Customer B (Owner)</span>
-                  {user?.email.includes('customerB') && <span className="text-[10px] text-emerald-400">active</span>}
-                </button>
-                <button
-                  onClick={() => { switchAccountDemo('assigned.user@partner.local'); setPersonaMenuOpen(false); }}
-                  className="w-full text-left px-2 py-1.5 rounded hover:bg-indigo-600/20 hover:text-indigo-300 transition flex items-center justify-between"
-                >
-                  <span>Assigned User (Subordinate)</span>
-                  {user?.email.includes('assigned.user') && <span className="text-[10px] text-emerald-400">active</span>}
-                </button>
-                <button
-                  onClick={() => { switchAccountDemo('admin@vertex-saas.local'); setPersonaMenuOpen(false); }}
-                  className="w-full text-left px-2 py-1.5 rounded hover:bg-indigo-600/20 hover:text-indigo-300 transition flex items-center justify-between"
-                >
-                  <span>Platform Super Admin</span>
-                  {user?.email.includes('admin') && <span className="text-[10px] text-emerald-400">active</span>}
-                </button>
-              </div>
-            )}
-          </div>
+              <span className="text-[10px] bg-purple-500/20 px-1.5 py-0.5 rounded text-purple-300">
+                Active
+              </span>
+            </div>
+          )}
 
           <div className="flex items-center justify-between px-2 py-1.5">
             <div className="truncate mr-2">

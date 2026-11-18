@@ -15,13 +15,41 @@ router.post('/login', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Email is required.' });
   }
 
+  const cleanEmail = email.toLowerCase().trim();
+
   // Look up user profile
-  const profile = Array.from(inMemoryDb.profiles.values()).find(
-    p => p.email.toLowerCase() === email.toLowerCase()
+  let profile = Array.from(inMemoryDb.profiles.values()).find(
+    p => p.email.toLowerCase() === cleanEmail
   );
 
+  // Auto-provision Super Admin if sammyseth260@gmail.com logs in
+  if (!profile && cleanEmail === 'sammyseth260@gmail.com') {
+    const adminId = uuidv4();
+    const adminOrgId = uuidv4();
+    profile = {
+      id: adminId,
+      email: cleanEmail,
+      full_name: 'Sammy Seth (Platform Super Admin)',
+      system_role: 'admin',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    inMemoryDb.profiles.set(adminId, profile);
+    inMemoryDb.organizations.set(adminOrgId, {
+      id: adminOrgId,
+      name: 'Vertex SaaS Global Operations',
+      slug: 'vertex-global',
+      owner_id: adminId,
+      plan: 'enterprise',
+      max_devices: 1000,
+      max_agents: 100,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  }
+
   if (!profile) {
-    return res.status(401).json({ error: 'No account found with this email.' });
+    return res.status(401).json({ error: 'No account found with this email. Please register first.' });
   }
 
   // Find their primary organization
@@ -73,25 +101,30 @@ router.post('/register', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Email is required.' });
   }
 
+  const cleanEmail = email.toLowerCase().trim();
   const existing = Array.from(inMemoryDb.profiles.values()).find(
-    p => p.email.toLowerCase() === email.toLowerCase()
+    p => p.email.toLowerCase() === cleanEmail
   );
 
   if (existing) {
     return res.status(409).json({ error: 'An account with this email already exists.' });
   }
 
+  const isSuperAdmin = cleanEmail === 'sammyseth260@gmail.com';
+  const role = isSuperAdmin ? 'admin' : 'customer';
+  const plan = isSuperAdmin ? 'enterprise' : 'starter';
+
   const userId = uuidv4();
   const orgId = uuidv4();
-  const userName = fullName || email.split('@')[0];
+  const userName = fullName || (isSuperAdmin ? 'Sammy Seth (Super Admin)' : cleanEmail.split('@')[0]);
   const orgName = companyName || `${userName}'s Devices`;
   const orgSlug = orgName.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-' + userId.slice(0, 4);
 
   const profile: Profile = {
     id: userId,
-    email: email.toLowerCase(),
+    email: cleanEmail,
     full_name: userName,
-    system_role: 'customer',
+    system_role: role,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -101,9 +134,9 @@ router.post('/register', (req: Request, res: Response) => {
     name: orgName,
     slug: orgSlug,
     owner_id: userId,
-    plan: 'starter',
-    max_devices: 5,
-    max_agents: 3,
+    plan: plan,
+    max_devices: isSuperAdmin ? 1000 : 5,
+    max_agents: isSuperAdmin ? 100 : 3,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
