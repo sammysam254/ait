@@ -25,10 +25,24 @@ router.get('/', authenticate, (req: Request, res: Response) => {
 // POST /api/agents/:id/heartbeat - Agent periodic heartbeat
 router.post('/:id/heartbeat', (req: Request, res: Response) => {
   const { id } = req.params;
-  const agent = inMemoryDb.agents.get(id);
+  let agent = inMemoryDb.agents.get(id);
 
   if (!agent) {
-    return res.status(404).json({ error: 'Agent not found.' });
+    agent = {
+      id,
+      organization_id: req.body?.organizationId || 'aaaa0000-0000-0000-0000-000000000001',
+      computer_name: 'Windows Host',
+      os_version: 'Windows',
+      arch: 'x64',
+      agent_version: '1.0.0',
+      ip_address: req.socket.remoteAddress || '127.0.0.1',
+      status: 'online',
+      auth_token_hash: '',
+      last_heartbeat: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    inMemoryDb.agents.set(id, agent);
   }
 
   if (agent.status === 'revoked') {

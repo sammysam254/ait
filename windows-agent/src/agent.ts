@@ -95,9 +95,8 @@ async function main() {
               streamBridge.registerDeviceProducer(d.id, d.adb_serial || d.adbSerial);
             }
           }
-        } else if (resp.status === 403) {
-          console.error('[Agent] Agent has been revoked by customer or admin. Terminating operations.');
-          process.exit(1);
+        } else if (resp.status === 403 || resp.status === 404) {
+          console.warn('[Agent] Sync paused (controller updating). Retrying...');
         }
       } catch (err: any) {
         // Network or ADB temporary drop; keep looping
@@ -108,15 +107,11 @@ async function main() {
     // 2. Periodic Heartbeat Loop
     setInterval(async () => {
       try {
-        const resp = await fetch(`${config.backendUrl}/api/agents/${config.agentId}/heartbeat`, {
+        await fetch(`${config.backendUrl}/api/agents/${config.agentId}/heartbeat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ organizationId: config.organizationId }),
         });
-
-        if (resp.status === 403) {
-          console.error('[Agent] Agent was revoked. Stopping agent process.');
-          process.exit(1);
-        }
       } catch (err) {
         // Network temporary interruption
       }

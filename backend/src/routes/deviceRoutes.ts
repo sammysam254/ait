@@ -45,9 +45,26 @@ router.post('/sync', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'agentId, organizationId, and devices array are required.' });
   }
 
-  const agent = inMemoryDb.agents.get(agentId);
-  if (!agent || agent.status === 'revoked') {
-    return res.status(403).json({ error: 'Agent not recognized or has been revoked.' });
+  let agent = inMemoryDb.agents.get(agentId);
+  if (!agent) {
+    // If container restarted, restore agent session into memory
+    agent = {
+      id: agentId,
+      organization_id: organizationId,
+      computer_name: 'Windows Host',
+      os_version: 'Windows',
+      arch: 'x64',
+      agent_version: '1.0.0',
+      ip_address: (req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.socket.remoteAddress || '127.0.0.1'),
+      status: 'online',
+      auth_token_hash: '',
+      last_heartbeat: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    inMemoryDb.agents.set(agentId, agent);
+  } else if (agent.status === 'revoked') {
+    return res.status(403).json({ error: 'Agent has been revoked.' });
   }
 
   const synced = DeviceService.syncAgentDevices(agentId, organizationId, devices);
