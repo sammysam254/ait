@@ -72,7 +72,8 @@ export const DeviceViewerPage: React.FC = () => {
   const connectStream = () => {
     const token = localStorage.getItem('vtx_token');
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProto}//${window.location.host}/ws?token=${encodeURIComponent(token || '')}&deviceId=${id}`;
+    const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
+    const wsUrl = `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(token || '')}&deviceId=${id}`;
 
     setStatus('connecting');
 

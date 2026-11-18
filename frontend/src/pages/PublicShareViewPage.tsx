@@ -95,7 +95,8 @@ export const PublicShareViewPage: React.FC = () => {
 
   const connectViewerStream = (sToken: string, devId: string) => {
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProto}//${window.location.host}/ws?token=${encodeURIComponent(sToken)}&deviceId=${devId}`;
+    const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
+    const wsUrl = `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(sToken)}&deviceId=${devId}`;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
