@@ -23,7 +23,13 @@ export class AdbManager {
   }
 
   public isAdbAvailable(): boolean {
-    return fs.existsSync(this.adbPath);
+    if (fs.existsSync(this.adbPath)) return true;
+    try {
+      execSync(`"${this.adbPath}" version`, { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private runAdb(args: string[]): Promise<string> {

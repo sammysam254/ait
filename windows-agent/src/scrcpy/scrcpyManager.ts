@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -22,7 +22,13 @@ export class ScrcpyManager {
   }
 
   public isScrcpyAvailable(): boolean {
-    return fs.existsSync(this.scrcpyPath);
+    if (fs.existsSync(this.scrcpyPath)) return true;
+    try {
+      execSync(`"${this.scrcpyPath}" --version`, { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

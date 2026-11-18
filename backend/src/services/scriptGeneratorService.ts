@@ -51,7 +51,7 @@ REM 1. Check Administrator Privileges
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo [!] NOTE: Running with standard user privileges.
-    echo     USB and adb device streaming will work normally.
+    echo     USB and ADB device streaming will work normally.
     echo.
 )
 
@@ -78,6 +78,9 @@ if not exist "%VERTEX_DIR%" (
     mkdir "%VERTEX_DIR%" 2>nul
 )
 
+set "SCRCPY_DIR=%VERTEX_DIR%\\scrcpy"
+if not exist "%SCRCPY_DIR%" mkdir "%SCRCPY_DIR%" 2>nul
+
 REM 4. Write Configuration File
 echo [*] Writing agent configuration...
 (
@@ -90,48 +93,125 @@ echo [*] Writing agent configuration...
     echo }
 ) > "%VERTEX_DIR%\\config.json"
 
-REM 5. Deploy scrcpy Distribution
-echo [*] Checking bundled scrcpy and ADB distribution...
-set "SCRCPY_DIR=%VERTEX_DIR%\\scrcpy"
+REM 5. Search System for Existing ADB & scrcpy Dependencies
+echo.
+echo [*] Checking and locating ADB and scrcpy dependencies...
 
+REM Check local bundled packages first
 if exist "%~dp0windows-agent\\resources\\scrcpy-win64-v3.3.4\\scrcpy.exe" (
-    echo [*] Found local scrcpy 3.3.4 distribution. Deploying to agent directory...
-    xcopy /Y /E /I "%~dp0windows-agent\\resources\\scrcpy-win64-v3.3.4\\*" "%SCRCPY_DIR%\\" >nul
+    echo [FOUND] Local scrcpy distribution detected in repository. Deploying...
+    xcopy /Y /E /I "%~dp0windows-agent\\resources\\scrcpy-win64-v3.3.4\\*" "%SCRCPY_DIR%\\" >nul 2>&1
 ) else if exist "%~dp0resources\\scrcpy-win64-v3.3.4\\scrcpy.exe" (
-    echo [*] Found local scrcpy 3.3.4 distribution. Deploying to agent directory...
-    xcopy /Y /E /I "%~dp0resources\\scrcpy-win64-v3.3.4\\*" "%SCRCPY_DIR%\\" >nul
-) else if exist "%SCRCPY_DIR%\\scrcpy.exe" (
-    echo [*] scrcpy already installed in %SCRCPY_DIR%
+    echo [FOUND] Local scrcpy distribution detected. Deploying...
+    xcopy /Y /E /I "%~dp0resources\\scrcpy-win64-v3.3.4\\*" "%SCRCPY_DIR%\\" >nul 2>&1
+)
+
+REM Search Windows host system for already-installed ADB
+if not exist "%SCRCPY_DIR%\\adb.exe" (
+    for /f "delims=" %%I in ('where adb.exe 2^>nul') do (
+        if exist "%%~I" if not exist "%SCRCPY_DIR%\\adb.exe" (
+            echo [FOUND] Discovered existing ADB on system: "%%~I"
+            copy /Y "%%~dpIadb.exe" "%SCRCPY_DIR%\\" >nul 2>&1
+            copy /Y "%%~dpIAdbWinApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
+            copy /Y "%%~dpIAdbWinUsbApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
+        )
+    )
+)
+
+if not exist "%SCRCPY_DIR%\\adb.exe" if exist "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb.exe" (
+    echo [FOUND] Discovered Android SDK platform-tools ADB.
+    copy /Y "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\adb.exe" "%SCRCPY_DIR%\\" >nul 2>&1
+    copy /Y "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\AdbWinApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
+    copy /Y "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\AdbWinUsbApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
+)
+
+if not exist "%SCRCPY_DIR%\\adb.exe" if exist "C:\\Program Files (x86)\\ONIRENT\\adb.exe" (
+    echo [FOUND] Discovered existing ADB at ONIRENT.
+    copy /Y "C:\\Program Files (x86)\\ONIRENT\\adb.exe" "%SCRCPY_DIR%\\" >nul 2>&1
+    copy /Y "C:\\Program Files (x86)\\ONIRENT\\AdbWinApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
+    copy /Y "C:\\Program Files (x86)\\ONIRENT\\AdbWinUsbApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
+)
+
+if not exist "%SCRCPY_DIR%\\adb.exe" if exist "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\adb.exe" (
+    echo [FOUND] Discovered existing ADB at platform-tools.
+    copy /Y "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\adb.exe" "%SCRCPY_DIR%\\" >nul 2>&1
+    copy /Y "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\AdbWinApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
+    copy /Y "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\AdbWinUsbApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
+)
+
+REM Search Windows host system for already-installed scrcpy
+if not exist "%SCRCPY_DIR%\\scrcpy.exe" (
+    for /f "delims=" %%I in ('where scrcpy.exe 2^>nul') do (
+        if exist "%%~I" if not exist "%SCRCPY_DIR%\\scrcpy.exe" (
+            echo [FOUND] Discovered existing scrcpy on system: "%%~I"
+            xcopy /Y /E /I "%%~dpI*" "%SCRCPY_DIR%\\" >nul 2>&1
+        )
+    )
+)
+
+REM If scrcpy or adb is still missing, automatically install the official distribution
+if not exist "%SCRCPY_DIR%\\scrcpy.exe" (
+    set "NEED_INSTALL=1"
+) else if not exist "%SCRCPY_DIR%\\adb.exe" (
+    set "NEED_INSTALL=1"
 ) else (
-    echo [*] Fetching scrcpy 3.3.4 official binaries from controller...
+    set "NEED_INSTALL=0"
+)
+
+if "%NEED_INSTALL%" equ "1" (
+    echo [*] Downloading and installing official scrcpy 3.3.4 ^& ADB binaries...
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
       "$ErrorActionPreference = 'Stop'; " ^
       "try { " ^
       "  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " ^
-      "  Invoke-WebRequest -Uri '${backendUrl}/api/enrollment/download-scrcpy' -OutFile '%VERTEX_DIR%\\scrcpy.zip'; " ^
-      "  Expand-Archive -Path '%VERTEX_DIR%\\scrcpy.zip' -DestinationPath '%VERTEX_DIR%\\scrcpy_extract' -Force; " ^
-      "  Remove-Item '%VERTEX_DIR%\\scrcpy.zip' -Force; " ^
-      "  if (Test-Path '%VERTEX_DIR%\\scrcpy_extract\\scrcpy-win64-v3.3.4') { " ^
-      "    Copy-Item -Path '%VERTEX_DIR%\\scrcpy_extract\\scrcpy-win64-v3.3.4\\*' -Destination '%SCRCPY_DIR%' -Recurse -Force; " ^
+      "  $zip = '%VERTEX_DIR%\\scrcpy.zip'; " ^
+      "  $extract = '%VERTEX_DIR%\\scrcpy_extract'; " ^
+      "  $downloaded = $false; " ^
+      "  try { " ^
+      "    Write-Host '[*] Fetching bundle from cloud controller...' -ForegroundColor Cyan; " ^
+      "    Invoke-WebRequest -Uri '${backendUrl}/api/enrollment/download-scrcpy' -OutFile $zip -TimeoutSec 30; " ^
+      "    if ((Get-Item $zip).Length -gt 100000) { $downloaded = $true; } " ^
+      "  } catch { " ^
+      "    Write-Host '[!] Cloud controller bundle unavailable, falling back to official release...' -ForegroundColor Yellow; " ^
+      "  } " ^
+      "  if (-not $downloaded) { " ^
+      "    Write-Host '[*] Downloading scrcpy 3.3.4 from Genymobile official release...' -ForegroundColor Cyan; " ^
+      "    Invoke-WebRequest -Uri 'https://github.com/Genymobile/scrcpy/releases/download/v3.3.4/scrcpy-win64-v3.3.4.zip' -OutFile $zip -TimeoutSec 60; " ^
+      "  } " ^
+      "  if (Test-Path $extract) { Remove-Item $extract -Recurse -Force; } " ^
+      "  Expand-Archive -Path $zip -DestinationPath $extract -Force; " ^
+      "  Remove-Item $zip -Force; " ^
+      "  $bin = Get-ChildItem -Path $extract -Recurse -Filter 'scrcpy.exe' | Select-Object -First 1; " ^
+      "  if ($bin) { " ^
+      "    Copy-Item -Path ($bin.Directory.FullName + '\\*') -Destination '%SCRCPY_DIR%' -Recurse -Force; " ^
+      "    Write-Host '[OK] scrcpy 3.3.4 and ADB binaries deployed successfully.' -ForegroundColor Green; " ^
       "  } else { " ^
-      "    Copy-Item -Path '%VERTEX_DIR%\\scrcpy_extract\\*' -Destination '%SCRCPY_DIR%' -Recurse -Force; " ^
+      "    Write-Host '[ERROR] scrcpy.exe was not found in downloaded package.' -ForegroundColor Red; exit 1; " ^
       "  }; " ^
-      "  Remove-Item '%VERTEX_DIR%\\scrcpy_extract' -Recurse -Force; " ^
-      "  Write-Host '[OK] scrcpy binaries successfully deployed.' -ForegroundColor Green; " ^
+      "  Remove-Item $extract -Recurse -Force; " ^
       "} catch { " ^
-      "  Write-Host ('[ERROR] Failed to download scrcpy: ' + $_.Exception.Message) -ForegroundColor Red; " ^
+      "  Write-Host ('[ERROR] Failed to install scrcpy/ADB: ' + $_.Exception.Message) -ForegroundColor Red; " ^
       "  exit 1; " ^
       "}"
 )
 
-REM 6. Test ADB Availability
+REM 6. Verify ADB and scrcpy Availability
+echo.
 if exist "%SCRCPY_DIR%\\adb.exe" (
-    echo [OK] ADB is ready at "%SCRCPY_DIR%\\adb.exe"
+    echo [OK] ADB is operational:
+    "%SCRCPY_DIR%\\adb.exe" version
 ) else (
-    echo [ERROR] adb.exe was not found in %SCRCPY_DIR%.
+    echo [ERROR] adb.exe could not be found or installed.
     echo.
     pause
     exit /b 1
+)
+
+if exist "%SCRCPY_DIR%\\scrcpy.exe" (
+    echo [OK] scrcpy is operational:
+    "%SCRCPY_DIR%\\scrcpy.exe" --version
+) else (
+    echo [!] WARNING: scrcpy.exe was not found. Basic ADB device management will work.
 )
 
 REM 7. Contact Cloud Controller to Complete Enrollment
