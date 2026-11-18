@@ -128,13 +128,6 @@ if not exist "%SCRCPY_DIR%\\adb.exe" if exist "%LOCALAPPDATA%\\Android\\Sdk\\pla
     copy /Y "%LOCALAPPDATA%\\Android\\Sdk\\platform-tools\\AdbWinUsbApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
 )
 
-if not exist "%SCRCPY_DIR%\\adb.exe" if exist "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\adb.exe" (
-    echo [FOUND] Discovered existing ADB at platform-tools.
-    copy /Y "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\adb.exe" "%SCRCPY_DIR%\\" >nul 2>&1
-    copy /Y "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\AdbWinApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
-    copy /Y "C:\\cln\\smartphonetestfarm\\.tools\\platform-tools\\AdbWinUsbApi.dll" "%SCRCPY_DIR%\\" >nul 2>&1
-)
-
 REM Search Windows host system for already-installed scrcpy
 if not exist "%SCRCPY_DIR%\\scrcpy.exe" (
     for /f "delims=" %%I in ('where scrcpy.exe 2^>nul') do (

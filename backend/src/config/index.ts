@@ -6,7 +6,7 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
 
 export const config = {
-  port: parseInt(process.env.PORT || '4000', 10),
+  port: parseInt(process.env.PORT || '5000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
   jwtSecret: process.env.JWT_SECRET || 'vertex-saas-super-secure-jwt-secret-key-32-chars-min',
   encryptionKey: process.env.ENCRYPTION_KEY || 'vertex-encryption-key-32-chars-long!',
