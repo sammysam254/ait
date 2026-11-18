@@ -11,6 +11,7 @@ if [ "$LOCAL" != "$REMOTE" ]; then
     echo "[$(date)] New commit detected! Updating backend..."
     git pull origin main
     sudo docker compose build
-    sudo docker compose up -d
+    sudo docker rm -f vertex-saas-backend 2>/dev/null
+    sudo docker compose up -d --force-recreate --remove-orphans
     echo "[$(date)] Backend successfully rebuilt and restarted!"
 fi
