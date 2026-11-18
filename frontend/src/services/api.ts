@@ -191,7 +191,7 @@ export class ApiService {
   }
 
   static async getDevice(id: string) {
-    return this.request<{ device: any; permissions: any; agent: any }>(`/devices/${id}`);
+    return this.request<{ device: any; permissions: any; agent: any; streamToken?: string; streamWsUrl?: string }>(`/devices/${id}`);
   }
 
   // Agents

@@ -18,9 +18,9 @@ if (!WsClient) {
   }
 }
 
-console.log('=======================================================');
-console.log('📱 Vertex SaaS Windows Host Agent & Streaming Engine');
-console.log('=======================================================');
+console.log('===============================================================================');
+console.log('       📱 VERTEX SAAS CLOUD DEVICE MANAGEMENT - HOST STREAMING ENGINE        ');
+console.log('===============================================================================');
 
 // Resolve directories
 const appData = process.env.LOCALAPPDATA || (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Local') : '');
@@ -39,7 +39,7 @@ for (const d of candidateDirs) {
   }
 }
 
-console.log('[Agent] Working directory:', agentDir);
+console.log('[Agent] Working directory   :', agentDir);
 
 // Read config & credentials
 function loadConfig() {
@@ -75,10 +75,10 @@ function loadConfig() {
 }
 
 const config = loadConfig();
-console.log(`[Agent] Host: ${config.computerName}`);
-console.log(`[Agent] Backend: ${config.backendUrl}`);
-console.log(`[Agent] Agent ID: ${config.agentId || 'Not enrolled'}`);
-console.log(`[Agent] Org ID: ${config.organizationId}`);
+console.log('[Agent] Host Computer       :', config.computerName);
+console.log('[Agent] Cloud Controller Host:', config.backendUrl);
+console.log('[Agent] Enrolled Agent ID   :', config.agentId || 'Waiting for enrollment...');
+console.log('[Agent] Organization ID     :', config.organizationId);
 
 // Locate ADB
 function findAdb() {
@@ -97,7 +97,7 @@ function findAdb() {
 }
 
 const adbPath = findAdb();
-console.log('[Agent] ADB path:', adbPath);
+console.log('[Agent] ADB Executable      :', adbPath);
 
 function execAdb(args, timeout = 10000) {
   return new Promise((resolve, reject) => {
@@ -129,12 +129,14 @@ async function injectInput(serial, action, data) {
       case 'tap': {
         const x = Math.round(data.x);
         const y = Math.round(data.y);
+        console.log(`[Input] 👉 Tap at (${x}, ${y}) on ${serial}`);
         await execAdb(['-s', serial, 'shell', 'input', 'tap', x.toString(), y.toString()]);
         return true;
       }
       case 'swipe': {
         const { startX, startY, endX, endY, durationMs } = data;
         const dur = Math.round(durationMs || 250);
+        console.log(`[Input] 👆 Swipe from (${Math.round(startX)}, ${Math.round(startY)}) to (${Math.round(endX)}, ${Math.round(endY)}) [${dur}ms] on ${serial}`);
         await execAdb(['-s', serial, 'shell', 'input', 'swipe',
           Math.round(startX).toString(),
           Math.round(startY).toString(),
@@ -145,23 +147,29 @@ async function injectInput(serial, action, data) {
         return true;
       }
       case 'back':
+        console.log(`[Input] ◀️ Key: BACK on ${serial}`);
         await execAdb(['-s', serial, 'shell', 'input', 'keyevent', '4']);
         return true;
       case 'home':
+        console.log(`[Input] 🔘 Key: HOME on ${serial}`);
         await execAdb(['-s', serial, 'shell', 'input', 'keyevent', '3']);
         return true;
       case 'recents':
+        console.log(`[Input] ⏹️ Key: RECENTS on ${serial}`);
         await execAdb(['-s', serial, 'shell', 'input', 'keyevent', '187']);
         return true;
       case 'rotate':
         const r = data && data.orientation === 'landscape' ? '1' : '0';
+        console.log(`[Input] 🔄 Rotate: ${data && data.orientation === 'landscape' ? 'Landscape' : 'Portrait'} on ${serial}`);
         await execAdb(['-s', serial, 'shell', 'settings', 'put', 'system', 'user_rotation', r]);
         return true;
       case 'text':
+        console.log(`[Input] ⌨️ Text: "${data.text}" on ${serial}`);
         const escaped = (data.text || '').replace(/([^\w])/g, '\\$1');
         await execAdb(['-s', serial, 'shell', 'input', 'text', escaped]);
         return true;
       case 'key_event':
+        console.log(`[Input] 🔘 Keycode: ${data.keyCode} on ${serial}`);
         await execAdb(['-s', serial, 'shell', 'input', 'keyevent', data.keyCode.toString()]);
         return true;
     }
@@ -179,7 +187,7 @@ let isReconnecting = false;
 
 function connectWebSocket() {
   if (!config.agentAuthToken) {
-    console.warn('[Agent] No agentAuthToken found. Waiting for enrollment...');
+    console.warn('[StreamBridge] Missing agentAuthToken in credentials. Waiting for enrollment...');
     return;
   }
 
@@ -187,16 +195,17 @@ function connectWebSocket() {
   const host = config.backendUrl.replace(/^https?:\/\//, '');
   const wsUrl = `${wsProto}//${host}/ws?token=${encodeURIComponent(config.agentAuthToken)}&type=agent`;
 
-  console.log(`[StreamBridge] Connecting to cloud signaling server: ${wsProto}//${host}/ws...`);
+  console.log(`[StreamBridge] Connecting to Cloud Signaling: ${wsProto}//${host}/ws...`);
 
   try {
     ws = new WsClient(wsUrl);
 
     ws.onopen = () => {
-      console.log('[StreamBridge] Connected to cloud signaling server successfully.');
+      console.log('[StreamBridge] 🟢 Connected to Cloud Signaling Gateway successfully.');
       isReconnecting = false;
       // Re-register all known devices
       for (const [devId, ser] of registeredDevices.entries()) {
+        console.log(`[StreamBridge] Registering device producer: ${devId} (${ser})`);
         ws.send(JSON.stringify({ type: 'agent-register-device', deviceId: devId, serial: ser }));
       }
     };
@@ -212,13 +221,13 @@ function connectWebSocket() {
     };
 
     ws.onclose = (e) => {
-      console.warn(`[StreamBridge] WebSocket disconnected (${e.code || 'unknown'}). Auto-reconnecting in 3s...`);
+      console.warn(`[StreamBridge] 🟡 WebSocket disconnected (code: ${e.code || 'closed'}). Reconnecting in 3s...`);
       stopAllStreams();
       scheduleReconnect();
     };
 
     ws.onerror = (e) => {
-      console.warn('[StreamBridge] WebSocket error:', e.message || 'connection failed');
+      console.warn('[StreamBridge] 🔴 WebSocket error:', e.message || 'connection failed');
     };
   } catch (err) {
     console.error('[StreamBridge] Connection error:', err.message);
@@ -239,14 +248,14 @@ async function handleMessage(msg) {
     case 'start-stream': {
       const { deviceId, serial } = msg;
       const targetSerial = serial || registeredDevices.get(deviceId) || '';
-      console.log(`[StreamBridge] Received start-stream request for device: ${deviceId} (${targetSerial})`);
+      console.log(`[StreamBridge] 📺 Received start-stream request for device: ${deviceId} (${targetSerial})`);
       startStream(deviceId, targetSerial);
       break;
     }
 
     case 'idle-stream': {
       const { deviceId } = msg;
-      console.log(`[StreamBridge] Received idle-stream request for device: ${deviceId}`);
+      console.log(`[StreamBridge] ⏸️ Received idle-stream request for device: ${deviceId}`);
       stopStream(deviceId);
       break;
     }
@@ -273,10 +282,13 @@ function startStream(deviceId, serial) {
     return;
   }
 
-  console.log(`[StreamBridge] Starting real-time screen stream for ${deviceId} (${serial})...`);
+  console.log(`[StreamBridge] 🚀 Starting live real-time screen stream for ${deviceId} (${serial})...`);
   wakePhone(serial);
 
   let inFlight = false;
+  let framesSent = 0;
+  let lastStatsTime = Date.now();
+
   const interval = setInterval(async () => {
     if (!ws || ws.readyState !== 1) return; // 1 = OPEN
     if (inFlight) return;
@@ -290,6 +302,14 @@ function startStream(deviceId, serial) {
       const frameBuffer = await captureScreenshot(serial);
       if (frameBuffer && frameBuffer.length > 0 && ws.readyState === 1) {
         ws.send(frameBuffer);
+        framesSent++;
+        const now = Date.now();
+        if (now - lastStatsTime >= 4000) {
+          const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
+          console.log(`[Stream] 📡 Live stream active for ${serial}: ~${fps} FPS | ${Math.round(frameBuffer.length / 1024)} KB/frame`);
+          framesSent = 0;
+          lastStatsTime = now;
+        }
       }
     } catch (err) {
       // Ignore single frame capture error
@@ -317,6 +337,9 @@ function stopAllStreams() {
 }
 
 // Device discovery & Cloud Sync
+let loggedNoDevices = false;
+let knownSerials = new Set();
+
 async function discoverAndSync() {
   try {
     const raw = await execAdb(['devices', '-l']);
@@ -371,7 +394,25 @@ async function discoverAndSync() {
       });
     }
 
-    if (devices.length > 0 && config.agentId) {
+    if (devices.length === 0) {
+      if (!loggedNoDevices) {
+        console.log('[Device] ⚠️ No Android devices detected. Connect a phone via USB with USB Debugging enabled.');
+        loggedNoDevices = true;
+      }
+      return;
+    }
+
+    loggedNoDevices = false;
+
+    // Log newly detected devices
+    for (const d of devices) {
+      if (!knownSerials.has(d.adbSerial)) {
+        console.log(`[Device] 📱 Discovered: ${d.deviceName} (${d.adbSerial}) [${d.screenWidth}x${d.screenHeight}]`);
+        knownSerials.add(d.adbSerial);
+      }
+    }
+
+    if (config.agentId) {
       const resp = await fetch(`${config.backendUrl}/api/devices/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -388,6 +429,9 @@ async function discoverAndSync() {
           for (const d of data.devices) {
             const devId = d.id;
             const ser = d.adb_serial || d.adbSerial;
+            if (!registeredDevices.has(devId)) {
+              console.log(`[Device] ☁️ Synced with Cloud Fleet: ${d.device_name} (ID: ${devId})`);
+            }
             registeredDevices.set(devId, ser);
             if (ws && ws.readyState === 1) {
               ws.send(JSON.stringify({
@@ -398,6 +442,8 @@ async function discoverAndSync() {
             }
           }
         }
+      } else {
+        console.warn(`[Sync] Sync warning: HTTP ${resp.status}`);
       }
     }
   } catch (err) {
@@ -418,9 +464,12 @@ async function sendHeartbeat() {
 }
 
 // Start agent
+console.log('[Agent] Initializing background polling loops (Device discovery every 3s)...');
 connectWebSocket();
 discoverAndSync();
 setInterval(discoverAndSync, 3000);
 setInterval(sendHeartbeat, 10000);
 
-console.log('[Agent] Background discovery and cloud streaming bridge are active.');
+console.log('===============================================================================');
+console.log('       🟢 VERTEX SAAS AGENT IS OPERATIONAL & MONITORING LIVE ACTIVITY          ');
+console.log('===============================================================================');

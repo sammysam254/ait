@@ -294,34 +294,42 @@ if exist "%~dp0windows-agent\\agent_runner.js" (
 )
 
 where node >nul 2>&1
-if %errorLevel% equ 0 (
-    REM Check if Vertex SaaS Host Agent is already running (do not start duplicate)
-    tasklist /v /fi "imagename eq node.exe" 2>nul | find /i "Vertex SaaS Host Agent" >nul
-    if %errorLevel% equ 0 (
-        echo [OK] Vertex SaaS Host Agent is already active and streaming in background.
-    ) else (
-        echo [*] Launching Vertex SaaS Host Agent in background...
-        start "Vertex SaaS Host Agent" /b node "%VERTEX_DIR%\\agent_runner.js"
-        echo [OK] Vertex SaaS Host Agent started successfully.
-        echo [OK] Live low-latency screen streaming and touch control are now ACTIVE!
-    )
-) else (
+if %errorLevel% neq 0 (
+    echo.
+    echo ===============================================================================
     echo [!] Node.js not detected in system PATH.
-    echo     Please install Node.js (https://nodejs.org) to run the background streaming worker.
+    echo     Please install Node.js (https://nodejs.org) to run the streaming worker.
+    echo ===============================================================================
+    echo.
+    echo Window will remain open for diagnostics.
+    pause
+    exit /b 1
 )
 
 echo.
 echo ===============================================================================
-echo [SUCCESS] SETUP COMPLETE!
-echo.
-echo Your Windows host is now registered to your Vertex SaaS dashboard.
-echo Any Android phones connected via USB (with USB Debugging enabled) will
-echo automatically appear on your cloud dashboard at:
-echo ${backendUrl}
+echo [SUCCESS] SETUP COMPLETE - STARTING LIVE LOG MONITORING
 echo ===============================================================================
 echo.
-pause
-exit /b 0
+echo Connected phones with USB Debugging enabled will appear on your dashboard:
+echo ${backendUrl}
+echo.
+echo [IMPORTANT] DO NOT CLOSE THIS WINDOW.
+echo All real-time streaming diagnostics, device syncs, and touch inputs appear below.
+echo If any issue occurs, full error details will remain visible here.
+echo ===============================================================================
+echo.
+
+:run_agent
+node "%VERTEX_DIR%\\agent_runner.js"
+
+echo.
+echo ===============================================================================
+echo [!] Agent process exited (code %errorLevel%). Window will remain open.
+echo Press any key to restart the agent...
+echo ===============================================================================
+pause >nul
+goto run_agent
 `;
 
     return {

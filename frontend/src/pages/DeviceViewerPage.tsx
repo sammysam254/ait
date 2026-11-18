@@ -46,7 +46,6 @@ export const DeviceViewerPage: React.FC = () => {
   useEffect(() => {
     if (id) {
       loadDevice();
-      connectStream();
     }
 
     return () => {
@@ -63,17 +62,18 @@ export const DeviceViewerPage: React.FC = () => {
       setPermissions(data.permissions);
       const allowCtrl = searchParams.get('control') === 'true' && data.permissions?.can_control;
       setCanControl(!!allowCtrl);
+      connectStream(data.streamWsUrl, data.streamToken);
     } catch (e: any) {
       setStatus('error');
       setErrorMessage(e.message || 'Failed to load device.');
     }
   };
 
-  const connectStream = () => {
-    const token = localStorage.getItem('vtx_token');
+  const connectStream = (serverWsUrl?: string, serverToken?: string) => {
+    const token = serverToken || localStorage.getItem('vtx_token');
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
-    const wsUrl = `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(token || '')}&deviceId=${id}`;
+    const wsUrl = serverWsUrl || `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(token || '')}&deviceId=${id}`;
 
     setStatus('connecting');
 
@@ -330,7 +330,7 @@ export const DeviceViewerPage: React.FC = () => {
               </p>
               {status === 'offline' && (
                 <button
-                  onClick={connectStream}
+                  onClick={() => connectStream()}
                   className="px-4 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold"
                 >
                   Reconnect

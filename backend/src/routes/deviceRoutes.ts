@@ -1,7 +1,9 @@
 import { Router, Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
 import { authenticate } from '../middleware/auth';
 import { DeviceService } from '../services/deviceService';
 import { inMemoryDb } from '../database/supabaseClient';
+import { config } from '../config';
 
 const router = Router();
 
@@ -12,7 +14,7 @@ router.get('/', authenticate, (req: Request, res: Response) => {
   return res.json({ devices });
 });
 
-// GET /api/devices/:id - Get specific device details
+// GET /api/devices/:id - Get specific device details & fresh stream connection token
 router.get('/:id', authenticate, (req: Request, res: Response) => {
   const user = req.user!;
   const { id } = req.params;
@@ -26,9 +28,33 @@ router.get('/:id', authenticate, (req: Request, res: Response) => {
   // Find agent info
   const agent = inMemoryDb.agents.get(result.device!.agent_id);
 
+  // Generate dedicated, fresh streaming token and WebSocket URL for client
+  const streamToken = jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      system_role: user.system_role,
+      organizationId: user.organizationId,
+      deviceId: id,
+      type: 'viewer',
+    },
+    config.jwtSecret,
+    { expiresIn: '24h' }
+  );
+
+  let backendHost = 'api-streams.sam.co.ke';
+  try {
+    const parsed = new URL(config.backendUrl);
+    backendHost = parsed.host;
+  } catch (e) {}
+
+  const streamWsUrl = `wss://${backendHost}/ws?token=${encodeURIComponent(streamToken)}&deviceId=${id}`;
+
   return res.json({
     device: result.device,
     permissions: result.permissions,
+    streamToken,
+    streamWsUrl,
     agent: agent ? {
       computerName: agent.computer_name,
       osVersion: agent.os_version,
