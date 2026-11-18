@@ -237,36 +237,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "try { " ^
   "  $resp = Invoke-RestMethod -Uri '${backendUrl}/api/enrollment/enroll' -Method POST -Body $body -ContentType 'application/json'; " ^
   "  if ($resp.success) { " ^
-  "    [Console]::WriteLine('[SUCCESS] Enrolled successfully with Cloud Controller!'); " ^
-  "    [Console]::WriteLine('Agent ID : ' + $resp.agent.id); " ^
+  "    Write-Host '[SUCCESS] Enrolled successfully with Cloud Controller!'; " ^
+  "    Write-Host ('Agent ID : ' + $resp.agent.id); " ^
   "    $resp | ConvertTo-Json | Out-File -FilePath '%VERTEX_DIR%\\agent_credentials.json' -Encoding utf8; " ^
   "  } else { " ^
-  "    [Console]::WriteLine('[FAILED] ' + $resp.error); " ^
+  "    Write-Host ('[FAILED] ' + $resp.error); " ^
   "    exit 1; " ^
   "  } " ^
   "} catch { " ^
   "  $errMsg = $_.Exception.Message; " ^
   "  if ($_.Exception.Response) { " ^
   "    try { " ^
-  "      $stream = $_.Exception.Response.GetResponseStream(); " ^
-  "      if ($stream) { " ^
-  "        $reader = New-Object System.IO.StreamReader($stream); " ^
-  "        $errMsg = $reader.ReadToEnd(); " ^
-  "      } " ^
+  "      $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream()); " ^
+  "      $raw = $reader.ReadToEnd(); " ^
+  "      if ($raw) { $errMsg = $raw; } " ^
   "    } catch {} " ^
   "  } " ^
-  "  [Console]::WriteLine('[ERROR] Failed to enroll with controller: ' + $errMsg); " ^
+  "  Write-Host ('[ERROR] Failed to enroll with controller: ' + $errMsg); " ^
   "  exit 1; " ^
   "}"
 
 if %errorLevel% neq 0 (
-    echo.
-    echo ===============================================================================
-    echo [ERROR] Agent enrollment failed. Please verify your internet connection.
-    echo Window will stay open for diagnostics.
-    echo ===============================================================================
-    echo.
-    cmd /k
+    if exist "%VERTEX_DIR%\\agent_credentials.json" (
+        echo [!] Using cached credentials from previous successful enrollment.
+    ) else (
+        echo.
+        echo ===============================================================================
+        echo [ERROR] Agent enrollment failed. Please verify your internet connection.
+        echo Window will stay open for diagnostics.
+        echo ===============================================================================
+        echo.
+        cmd /k
+    )
 )
 
 REM 8. Deploy & Start Real-time Streaming Agent Runner

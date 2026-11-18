@@ -63,9 +63,6 @@ export class EnrollmentService {
       if (tokenRecord.is_revoked) {
         return { success: false, error: 'Enrollment token has been revoked by the customer.' };
       }
-      if (tokenRecord.used_at) {
-        return { success: false, error: 'This enrollment token has already been used and cannot be re-used.' };
-      }
       if (new Date(tokenRecord.expires_at).getTime() < Date.now()) {
         return { success: false, error: 'Enrollment token has expired. Please download a fresh setup script.' };
       }
@@ -111,33 +108,48 @@ export class EnrollmentService {
       inMemoryDb.organizations.set(orgId, org);
     }
 
-    // Check organization limits
-    const existingOrgAgents = Array.from(inMemoryDb.agents.values()).filter(a => a.organization_id === orgId && a.status !== 'revoked');
-    if (org && existingOrgAgents.length >= org.max_agents) {
-      return { success: false, error: `Plan limit reached: Maximum ${org.max_agents} agents allowed on ${org.plan} plan.` };
-    }
+    // Find existing agent for this computer and organization if already enrolled
+    const cleanComp = (hostInfo.computerName || 'Windows Host').trim().toLowerCase();
+    let agent = Array.from(inMemoryDb.agents.values()).find(
+      a => a.organization_id === orgId && a.computer_name.trim().toLowerCase() === cleanComp && a.status !== 'revoked'
+    );
 
-    // Generate permanent agent identity and auth credentials
-    const agentId = uuidv4();
     const agentAuthSecret = 'vtx_agt_' + crypto.randomBytes(32).toString('hex');
     const agentAuthTokenHash = crypto.createHash('sha256').update(agentAuthSecret).digest('hex');
 
-    const agent: Agent = {
-      id: agentId,
-      organization_id: orgId,
-      computer_name: hostInfo.computerName || 'Windows Host',
-      os_version: hostInfo.osVersion || 'Windows',
-      arch: hostInfo.arch || 'x64',
-      agent_version: '1.0.0',
-      ip_address: hostInfo.ipAddress || '127.0.0.1',
-      status: 'online',
-      auth_token_hash: agentAuthTokenHash,
-      last_heartbeat: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
+    if (agent) {
+      // Re-enroll existing agent
+      agent.os_version = hostInfo.osVersion || agent.os_version;
+      agent.arch = hostInfo.arch || agent.arch;
+      agent.ip_address = hostInfo.ipAddress || agent.ip_address;
+      agent.status = 'online';
+      agent.auth_token_hash = agentAuthTokenHash;
+      agent.last_heartbeat = new Date().toISOString();
+      agent.updated_at = new Date().toISOString();
+    } else {
+      // Check organization limits
+      const existingOrgAgents = Array.from(inMemoryDb.agents.values()).filter(a => a.organization_id === orgId && a.status !== 'revoked');
+      if (org && existingOrgAgents.length >= org.max_agents) {
+        return { success: false, error: `Plan limit reached: Maximum ${org.max_agents} agents allowed on ${org.plan} plan.` };
+      }
 
-    inMemoryDb.agents.set(agentId, agent);
+      const agentId = uuidv4();
+      agent = {
+        id: agentId,
+        organization_id: orgId,
+        computer_name: hostInfo.computerName || 'Windows Host',
+        os_version: hostInfo.osVersion || 'Windows',
+        arch: hostInfo.arch || 'x64',
+        agent_version: '1.0.0',
+        ip_address: hostInfo.ipAddress || '127.0.0.1',
+        status: 'online',
+        auth_token_hash: agentAuthTokenHash,
+        last_heartbeat: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      inMemoryDb.agents.set(agentId, agent);
+    }
 
     // Create signed agent JWT token for subsequent agent API and WebSocket calls
     const agentJwt = jwt.sign(
