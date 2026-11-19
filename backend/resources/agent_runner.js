@@ -318,6 +318,7 @@ async function injectInput(serial, action, data) {
 let registeredDevices = new Map(); // deviceId -> serial
 let deviceIdToSerial = new Map();  // deviceId -> serial
 let serialToDeviceIds = new Map(); // serial -> Set<deviceId>
+let serialToActiveDeviceId = new Map(); // serial -> active streaming deviceId
 let activeStreams = new Map();     // serial -> { stop, serial }
 let cachedKeyframes = new Map();   // serial -> Buffer
 let ws = null;
@@ -392,6 +393,9 @@ async function handleMessage(msg) {
       const { deviceId, serial } = msg;
       const targetSerial = serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || '';
       console.log(`[StreamBridge] 📺 Received start-stream request for device: ${deviceId} (${targetSerial})`);
+      if (targetSerial && deviceId) {
+        serialToActiveDeviceId.set(targetSerial, deviceId);
+      }
       startStream(deviceId, targetSerial);
       break;
     }
@@ -434,6 +438,7 @@ function startStream(deviceId, targetSerial) {
   }
 
   deviceIdToSerial.set(deviceId, serial);
+  serialToActiveDeviceId.set(serial, deviceId);
   if (!serialToDeviceIds.has(serial)) {
     serialToDeviceIds.set(serial, new Set());
   }
@@ -568,22 +573,18 @@ function startStream(deviceId, targetSerial) {
                 cachedKeyframes.set(serial, fullKeyframe);
 
                 if (ws && ws.readyState === 1) {
-                  const devIds = serialToDeviceIds.get(serial);
-                  if (devIds) {
-                    for (const dId of devIds) {
-                      ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), fullKeyframe]));
-                    }
+                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                  if (targetDevId) {
+                    ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), fullKeyframe]));
                   }
                 }
                 framesSent++;
               } else {
                 // Complete delta frame
                 if (ws && ws.readyState === 1) {
-                  const devIds = serialToDeviceIds.get(serial);
-                  if (devIds) {
-                    for (const dId of devIds) {
-                      ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), packetData]));
-                    }
+                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                  if (targetDevId) {
+                    ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), packetData]));
                   }
                 }
                 framesSent++;
@@ -631,11 +632,9 @@ function startStream(deviceId, targetSerial) {
               buf = buf.subarray(12 + size);
 
               if (ws && ws.readyState === 1 && audioData.length > 0) {
-                const devIds = serialToDeviceIds.get(serial);
-                if (devIds) {
-                  for (const dId of devIds) {
-                    ws.send(Buffer.concat([Buffer.from(dId, 'utf8'), Buffer.from('AUD:'), audioData]));
-                  }
+                const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                if (targetDevId) {
+                  ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
                 }
               }
             }

@@ -189,18 +189,32 @@ export class SignalingServer {
           const serial = dev ? dev.adb_serial : '';
 
           let forwarded = 0;
-          for (const [rDevId, r] of this.deviceRooms.entries()) {
-            const rDev = inMemoryDb.devices.get(rDevId);
-            const matches = (rDevId === targetDeviceId) || (serial && rDev && rDev.adb_serial === serial);
-            if (matches || (!targetDeviceId && r.viewers.size > 0)) {
-              r.agent = session;
-              if (isConfig) {
-                r.lastHeader = videoPayload;
+          if (targetDeviceId && this.deviceRooms.has(targetDeviceId)) {
+            const r = this.deviceRooms.get(targetDeviceId)!;
+            r.agent = session;
+            if (isConfig) {
+              r.lastHeader = videoPayload;
+            }
+            for (const viewer of r.viewers) {
+              if (viewer.ws.readyState === WebSocket.OPEN) {
+                viewer.ws.send(videoPayload);
+                forwarded++;
               }
-              for (const viewer of r.viewers) {
-                if (viewer.ws.readyState === WebSocket.OPEN) {
-                  viewer.ws.send(videoPayload);
-                  forwarded++;
+            }
+          } else {
+            for (const [rDevId, r] of this.deviceRooms.entries()) {
+              const rDev = inMemoryDb.devices.get(rDevId);
+              const matches = (rDevId === targetDeviceId) || (serial && rDev && rDev.adb_serial === serial);
+              if ((matches || !targetDeviceId) && r.viewers.size > 0) {
+                r.agent = session;
+                if (isConfig) {
+                  r.lastHeader = videoPayload;
+                }
+                for (const viewer of r.viewers) {
+                  if (viewer.ws.readyState === WebSocket.OPEN) {
+                    viewer.ws.send(videoPayload);
+                    forwarded++;
+                  }
                 }
               }
             }

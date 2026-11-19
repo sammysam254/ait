@@ -45,6 +45,7 @@ export const DeviceViewerPage: React.FC = () => {
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const nextAudioTimeRef = useRef<number>(0);
 
   // Initialize and resume AudioContext on user gesture
   const initAudioCtx = () => {
@@ -59,7 +60,7 @@ export const DeviceViewerPage: React.FC = () => {
     } catch (e) {}
   };
 
-  // Play real-time raw PCM audio streamed from phone via scrcpy
+  // Play real-time raw PCM audio streamed from phone via scrcpy (smooth seamless decoding)
   const playPcmAudio = (rawBytes: Uint8Array) => {
     try {
       if (!audioCtxRef.current || audioCtxRef.current.state !== 'running') return;
@@ -68,11 +69,21 @@ export const DeviceViewerPage: React.FC = () => {
       if (pcm.length > 44 && pcm[0] === 0x52 && pcm[1] === 0x49 && pcm[2] === 0x46 && pcm[3] === 0x46) {
         pcm = pcm.subarray(44);
       }
-      const int16 = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 2));
-      if (int16.length === 0) return;
+      const sampleCount = Math.floor(pcm.byteLength / 2);
+      if (sampleCount === 0) return;
+
+      let int16: Int16Array;
+      if (pcm.byteOffset % 2 === 0) {
+        int16 = new Int16Array(pcm.buffer, pcm.byteOffset, sampleCount);
+      } else {
+        const copy = new Uint8Array(pcm);
+        int16 = new Int16Array(copy.buffer, 0, sampleCount);
+      }
+
       const channels = 2;
-      const frameCount = Math.floor(int16.length / channels);
+      const frameCount = Math.floor(sampleCount / channels);
       if (frameCount === 0) return;
+
       const audioBuf = ctx.createBuffer(channels, frameCount, 48000);
       const left = audioBuf.getChannelData(0);
       const right = audioBuf.getChannelData(1);
@@ -80,10 +91,18 @@ export const DeviceViewerPage: React.FC = () => {
         left[i] = int16[i * 2] / 32768.0;
         right[i] = int16[i * 2 + 1] / 32768.0;
       }
+
       const source = ctx.createBufferSource();
       source.buffer = audioBuf;
       source.connect(ctx.destination);
-      source.start();
+
+      const now = ctx.currentTime;
+      // Seamless jitter buffering: prevents scratches without accumulating latency
+      if (nextAudioTimeRef.current < now || nextAudioTimeRef.current > now + 0.08) {
+        nextAudioTimeRef.current = now + 0.015;
+      }
+      source.start(nextAudioTimeRef.current);
+      nextAudioTimeRef.current += audioBuf.duration;
     } catch (e) {}
   };
 
@@ -179,15 +198,6 @@ export const DeviceViewerPage: React.FC = () => {
           }
         } catch (e) {}
       } else if (event.data instanceof ArrayBuffer) {
-        frameCount++;
-        const now = performance.now();
-        if (now - lastTime >= 1000) {
-          setFps(Math.max(24, Math.round((frameCount * 1000) / (now - lastTime))));
-          setLatency(Math.floor(18 + Math.random() * 12));
-          frameCount = 0;
-          lastTime = now;
-        }
-
         const bytes = new Uint8Array(event.data);
 
         // Auto-detect live audio packet prefixed with 'AUD:' (0x41 0x55 0x44 0x3a)
@@ -196,6 +206,15 @@ export const DeviceViewerPage: React.FC = () => {
             playPcmAudio(bytes.subarray(4));
           }
           return;
+        }
+
+        frameCount++;
+        const now = performance.now();
+        if (now - lastTime >= 1000) {
+          setFps(Math.max(24, Math.round((frameCount * 1000) / (now - lastTime))));
+          setLatency(Math.floor(18 + Math.random() * 12));
+          frameCount = 0;
+          lastTime = now;
         }
 
         // Auto-detect JPEG / PNG fallback
