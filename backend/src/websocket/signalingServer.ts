@@ -189,23 +189,25 @@ export class SignalingServer {
           const serial = dev ? dev.adb_serial : '';
 
           let forwarded = 0;
-          if (targetDeviceId && this.deviceRooms.has(targetDeviceId)) {
-            const r = this.deviceRooms.get(targetDeviceId)!;
-            r.agent = session;
+          const targetRoom = targetDeviceId ? this.deviceRooms.get(targetDeviceId) : null;
+          if (targetRoom && targetRoom.viewers.size > 0) {
+            targetRoom.agent = session;
             if (isConfig) {
-              r.lastHeader = videoPayload;
+              targetRoom.lastHeader = videoPayload;
             }
-            for (const viewer of r.viewers) {
+            for (const viewer of targetRoom.viewers) {
               if (viewer.ws.readyState === WebSocket.OPEN) {
                 viewer.ws.send(videoPayload);
                 forwarded++;
               }
             }
           } else {
+            // Forward once to active room matching the device serial (never duplicate)
             for (const [rDevId, r] of this.deviceRooms.entries()) {
+              if (r.viewers.size === 0) continue;
               const rDev = inMemoryDb.devices.get(rDevId);
               const matches = (rDevId === targetDeviceId) || (serial && rDev && rDev.adb_serial === serial);
-              if ((matches || !targetDeviceId) && r.viewers.size > 0) {
+              if (matches) {
                 r.agent = session;
                 if (isConfig) {
                   r.lastHeader = videoPayload;
@@ -216,6 +218,7 @@ export class SignalingServer {
                     forwarded++;
                   }
                 }
+                break; // Exactly one room delivered; prevents multiplication loops!
               }
             }
           }

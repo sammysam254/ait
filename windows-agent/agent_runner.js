@@ -582,12 +582,20 @@ function startStream(deviceId, targetSerial) {
               } else {
                 // Complete delta frame
                 if (ws && ws.readyState === 1) {
-                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-                  if (targetDevId) {
-                    ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), packetData]));
+                  // Congestion backpressure: if socket has > 512KB buffered, drop delta and request keyframe
+                  if (ws.bufferedAmount > 512 * 1024) {
+                    const cSock = controlSockets.get(serial);
+                    if (cSock && !cSock.destroyed) {
+                      try { cSock.write(Buffer.from([17])); } catch (e) {}
+                    }
+                  } else {
+                    const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                    if (targetDevId) {
+                      ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), packetData]));
+                    }
+                    framesSent++;
                   }
                 }
-                framesSent++;
               }
 
               const now = Date.now();
@@ -632,9 +640,12 @@ function startStream(deviceId, targetSerial) {
               buf = buf.subarray(12 + size);
 
               if (ws && ws.readyState === 1 && audioData.length > 0) {
-                const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-                if (targetDevId) {
-                  ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
+                // Audio backpressure protection
+                if (ws.bufferedAmount < 512 * 1024) {
+                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                  if (targetDevId) {
+                    ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
+                  }
                 }
               }
             }
@@ -644,7 +655,7 @@ function startStream(deviceId, targetSerial) {
         sock.on('error', () => {});
       }
 
-      // 5. Spawn scrcpy-server with 1-second keyframe interval
+      // 5. Spawn scrcpy-server with smooth 60 FPS profile (4 Mbps, 1200px bounds)
       scrcpyProc = spawn(adbPath, [
         '-s', serial,
         'shell',
@@ -654,8 +665,8 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'max_size=1600',
-        'video_bit_rate=8000000',
+        'max_size=1200',
+        'video_bit_rate=4000000',
         'audio=true',
         'audio_codec=raw',
         'video_codec_options=i-frame-interval:int=1',

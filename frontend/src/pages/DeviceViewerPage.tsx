@@ -36,7 +36,7 @@ export const DeviceViewerPage: React.FC = () => {
   const [latency, setLatency] = useState(24);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [quality, setQuality] = useState<'high' | 'medium' | 'low'>('high');
-  const [isMuted, setIsMuted] = useState(true);
+  const [isMuted, setIsMuted] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -52,16 +52,14 @@ export const DeviceViewerPage: React.FC = () => {
     class PcmWorkletProcessor extends AudioWorkletProcessor {
       constructor() {
         super();
-        this.queue = [];
+        this._queue = [];
         this.port.onmessage = (e) => {
-          // Keep buffer tight (max 80ms) to ensure zero latency with no scratchy overflow
-          if (this.queue.length > 4) {
-            this.queue.splice(0, this.queue.length - 2);
+          if (this._queue.length > 30) {
+            this._queue.splice(0, 15);
           }
-          this.queue.push({
-            left: e.data.left,
-            right: e.data.right,
-            length: e.data.length,
+          this._queue.push({
+            channels: e.data.channels,
+            numFrames: e.data.numFrames,
             offset: 0
           });
         };
@@ -69,33 +67,34 @@ export const DeviceViewerPage: React.FC = () => {
 
       process(inputs, outputs) {
         const output = outputs[0];
-        if (!output || !output[0]) return true;
-        const outLen = output[0].length;
-        const outL = output[0];
-        const outR = output[1] || output[0];
+        if (!output || !output.length) return true;
+        const frameCount = output[0].length;
+        const outChannels = output.length;
         let written = 0;
 
-        while (written < outLen && this.queue.length > 0) {
-          const cur = this.queue[0];
-          const avail = cur.length - cur.offset;
-          const count = Math.min(outLen - written, avail);
+        while (written < frameCount && this._queue.length > 0) {
+          const block = this._queue[0];
+          const remaining = block.numFrames - block.offset;
+          const toWrite = Math.min(frameCount - written, remaining);
 
-          for (let i = 0; i < count; i++) {
-            outL[written + i] = cur.left[cur.offset + i];
-            outR[written + i] = cur.right[cur.offset + i];
+          for (let ch = 0; ch < outChannels; ch++) {
+            const src = ch < block.channels.length ? block.channels[ch] : block.channels[0];
+            output[ch].set(src.subarray(block.offset, block.offset + toWrite), written);
           }
 
-          written += count;
-          cur.offset += count;
-          if (cur.offset >= cur.length) {
-            this.queue.shift();
+          written += toWrite;
+          block.offset += toWrite;
+
+          if (block.offset >= block.numFrames) {
+            this._queue.shift();
           }
         }
 
-        // Clean silence on underrun (prevents all scratches, clicks and popping)
-        if (written < outLen) {
-          outL.fill(0, written);
-          outR.fill(0, written);
+        // Fill remaining with silence cleanly
+        if (written < frameCount) {
+          for (let ch = 0; ch < outChannels; ch++) {
+            output[ch].fill(0, written);
+          }
         }
 
         return true;
@@ -104,7 +103,7 @@ export const DeviceViewerPage: React.FC = () => {
     registerProcessor('pcm-worklet', PcmWorkletProcessor);
   `;
 
-  // Start AudioContext and AudioWorklet on trusted user interaction
+  // Start AudioContext and AudioWorklet on user gesture or stream open
   const startAudio = async () => {
     try {
       if (!audioCtxRef.current) {
@@ -178,7 +177,7 @@ export const DeviceViewerPage: React.FC = () => {
 
       // Zero-copy transfer directly to the AudioWorklet real-time audio thread
       workletRef.current.port.postMessage(
-        { left, right, length: frameCount },
+        { channels: [left, right], numFrames: frameCount },
         [left.buffer, right.buffer]
       );
     } catch (e) {}
@@ -259,6 +258,7 @@ export const DeviceViewerPage: React.FC = () => {
 
     ws.onopen = () => {
       setStatus('connected');
+      startAudio();
       // Actively request streaming frame feed from the agent
       ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
     };
@@ -343,18 +343,13 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Smooth low-latency sync without destroying reference frames (no macroblock tearing or black screens)
+            // Smooth live edge synchronization without clock jitter (prevents macroblock artifacts)
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const bufEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = bufEnd - videoRef.current.currentTime;
-              if (drift > 0.25) {
-                // Large drift: gently seek close to live edge with safe 40ms cushion
+              if (drift > 0.4) {
+                // Large drift (e.g. background tab): gently seek close to live edge with safe 40ms cushion
                 videoRef.current.currentTime = Math.max(0, bufEnd - 0.04);
-              } else if (drift > 0.06) {
-                // Minor drift: accelerate slightly to catch up seamlessly without seeking
-                videoRef.current.playbackRate = 1.05;
-              } else {
-                videoRef.current.playbackRate = 1.0;
               }
             }
           } catch (e) {
@@ -428,6 +423,7 @@ export const DeviceViewerPage: React.FC = () => {
   const lastMoveSentRef = useRef(0);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    startAudio();
     if (!canControl) return;
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
@@ -465,6 +461,7 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    startAudio();
     if (!canControl || e.touches.length === 0) return;
     const touch = e.touches[0];
     const coords = getDeviceCoords(touch.clientX, touch.clientY);
