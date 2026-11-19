@@ -231,6 +231,9 @@ export const DeviceViewerPage: React.FC = () => {
       setPermissions(data.permissions);
       const allowCtrl = searchParams.get('control') === 'true' && data.permissions?.can_control;
       setCanControl(!!allowCtrl);
+      if (data.device && data.device.id && data.device.id !== id) {
+        window.history.replaceState(null, '', `/viewer/${data.device.id}${window.location.search}`);
+      }
       connectStream(data.streamWsUrl, data.streamToken);
     } catch (e: any) {
       setStatus('error');
@@ -414,6 +417,17 @@ export const DeviceViewerPage: React.FC = () => {
       clearInterval(streamPoller);
       if (pingTimer) clearInterval(pingTimer);
       console.warn(`[Viewer] WebSocket disconnected (code: ${event.code}). Auto-reconnecting in 1.5s...`);
+      if (event.code === 4003 || event.code === 4002) {
+        // Forbidden or Stale ID: re-sync device metadata from API instead of looping on invalid token
+        if (isMountedRef.current && !reconnectTimerRef.current) {
+          reconnectTimerRef.current = setTimeout(() => {
+            if (isMountedRef.current) {
+              loadDevice();
+            }
+          }, 1500);
+        }
+        return;
+      }
       if (isMountedRef.current && !reconnectTimerRef.current) {
         reconnectTimerRef.current = setTimeout(() => {
           if (isMountedRef.current) {

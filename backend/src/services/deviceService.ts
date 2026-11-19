@@ -1,6 +1,8 @@
-import { v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
 import { inMemoryDb, Device } from '../database/supabaseClient';
 import { AuthenticatedUser } from '../middleware/auth';
+
+const VERTEX_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
 export class DeviceService {
   /**
@@ -53,7 +55,25 @@ export class DeviceService {
    * Retrieves a single device with strict tenant isolation check.
    */
   static getDeviceById(deviceId: string, user: AuthenticatedUser): { device?: Device; permissions?: any; error?: string; status: number } {
-    const device = inMemoryDb.devices.get(deviceId);
+    let device = inMemoryDb.devices.get(deviceId);
+    if (!device) {
+      // 1. Direct serial lookup
+      for (const dev of inMemoryDb.devices.values()) {
+        if (dev.adb_serial === deviceId) {
+          device = dev;
+          break;
+        }
+      }
+      // 2. Fallback: If device ID is stale from an older container session, alias to active device in tenant
+      if (!device) {
+        const orgDevices = Array.from(inMemoryDb.devices.values()).filter(d =>
+          user.system_role === 'admin' || d.organization_id === user.organizationId
+        );
+        if (orgDevices.length > 0) {
+          device = orgDevices[0];
+        }
+      }
+    }
     if (!device) {
       return { status: 404, error: 'Device not found.' };
     }
@@ -140,8 +160,9 @@ export class DeviceService {
         existing.updated_at = new Date().toISOString();
         registered.push(existing);
       } else {
+        const stableId = uuidv5(`${organizationId}:${d.adbSerial}`, VERTEX_NAMESPACE);
         const newDevice: Device = {
-          id: uuidv4(),
+          id: stableId,
           organization_id: organizationId,
           agent_id: agentId,
           adb_serial: d.adbSerial,

@@ -118,14 +118,12 @@ export class SignalingServer {
           });
 
           if (access.status !== 200 || !access.device) {
-            // If device exists and user is admin or owner, permit
-            const dev = inMemoryDb.devices.get(requestedDeviceId);
-            if (!dev) {
-              ws.send(JSON.stringify({ type: 'error', message: access.error || 'Device not found.' }));
-              ws.close(4003, 'Forbidden');
-              return;
-            }
+            ws.send(JSON.stringify({ type: 'error', message: access.error || 'Device not found.' }));
+            ws.close(4003, 'Forbidden');
+            return;
           }
+
+          const targetDeviceId = access.device.id;
 
           session = {
             ws,
@@ -133,12 +131,15 @@ export class SignalingServer {
             role: profile.system_role,
             userId: profile.id,
             organizationId,
-            deviceId: requestedDeviceId,
+            deviceId: targetDeviceId,
             canControl: profile.system_role === 'admin' || (access.permissions?.can_control ?? true),
             canView: true,
           };
 
-          this.handleViewerConnection(session, requestedDeviceId);
+          this.handleViewerConnection(session, targetDeviceId);
+          if (requestedDeviceId !== targetDeviceId) {
+            this.getRoom(requestedDeviceId).viewers.add(session);
+          }
         }
       } catch (err: any) {
         console.error('[SignalingServer] Auth error:', err?.message || err);

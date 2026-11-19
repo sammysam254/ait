@@ -25,8 +25,11 @@ router.get('/:id', authenticate, (req: Request, res: Response) => {
     return res.status(result.status).json({ error: result.error });
   }
 
+  const activeDevice = result.device!;
+  const realDeviceId = activeDevice.id;
+
   // Find agent info
-  const agent = inMemoryDb.agents.get(result.device!.agent_id);
+  const agent = inMemoryDb.agents.get(activeDevice.agent_id);
 
   // Generate dedicated, fresh streaming token and WebSocket URL for client
   const streamToken = jwt.sign(
@@ -35,7 +38,7 @@ router.get('/:id', authenticate, (req: Request, res: Response) => {
       email: user.email,
       system_role: user.system_role,
       organizationId: user.organizationId,
-      deviceId: id,
+      deviceId: realDeviceId,
       type: 'viewer',
     },
     config.jwtSecret,
@@ -48,10 +51,10 @@ router.get('/:id', authenticate, (req: Request, res: Response) => {
     backendHost = parsed.host;
   } catch (e) {}
 
-  const streamWsUrl = `wss://${backendHost}/ws?token=${encodeURIComponent(streamToken)}&deviceId=${id}`;
+  const streamWsUrl = `wss://${backendHost}/ws?token=${encodeURIComponent(streamToken)}&deviceId=${realDeviceId}`;
 
   return res.json({
-    device: result.device,
+    device: activeDevice,
     permissions: result.permissions,
     streamToken,
     streamWsUrl,
