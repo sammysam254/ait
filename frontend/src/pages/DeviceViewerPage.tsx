@@ -473,19 +473,41 @@ export const DeviceViewerPage: React.FC = () => {
     const x = Math.max(0, Math.min(deviceWidth, Math.round((touchX * deviceWidth) / clientWidth)));
     const y = Math.max(0, Math.min(deviceHeight, Math.round((touchY * deviceHeight) / clientHeight)));
 
-    return { x, y };
+    const width = deviceWidth;
+    const height = deviceHeight;
+    return { x, y, width, height };
   };
 
   const sendInput = (action: string, data: any) => {
     if (!canControl || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const deviceWidth = device?.screen_width || 720;
+    const deviceHeight = device?.screen_height || 1600;
     wsRef.current.send(JSON.stringify({
       type: 'control-input',
       action,
-      data,
+      data: {
+        width: deviceWidth,
+        height: deviceHeight,
+        ...data,
+      },
     }));
   };
 
   const lastMoveSentRef = useRef(0);
+
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (!canControl) return;
+    const coords = getDeviceCoords(e.clientX, e.clientY);
+    if (!coords) return;
+
+    // e.deltaY > 0 is scroll down (next video in TikTok!), negative is scroll up
+    sendInput('scroll', {
+      x: coords.x,
+      y: coords.y,
+      hScroll: Math.round(e.deltaX),
+      vScroll: Math.round(-e.deltaY),
+    });
+  };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     startAudio();
@@ -494,17 +516,25 @@ export const DeviceViewerPage: React.FC = () => {
     if (!coords) return;
 
     isMouseDownRef.current = true;
-    sendInput('touch_down', { x: coords.x, y: coords.y });
+    const startX = coords.x;
+    const startY = coords.y;
+    const startTime = performance.now();
+    let currentX = startX;
+    let currentY = startY;
+
+    sendInput('touch_down', { x: startX, y: startY });
 
     const onGlobalMouseMove = (ev: MouseEvent) => {
       if (!isMouseDownRef.current) return;
-      const now = Date.now();
-      // High-speed 125Hz sampling (8ms) for instantaneous, zero-latency touch drag
-      if (now - lastMoveSentRef.current < 8) return;
+      const now = performance.now();
+      // Smooth 60Hz sampling (16ms) to prevent TCP congestion and maintain velocity tracking
+      if (now - lastMoveSentRef.current < 16) return;
       lastMoveSentRef.current = now;
 
       const c = getDeviceCoords(ev.clientX, ev.clientY);
       if (c) {
+        currentX = c.x;
+        currentY = c.y;
         sendInput('touch_move', { x: c.x, y: c.y });
       }
     };
@@ -516,8 +546,23 @@ export const DeviceViewerPage: React.FC = () => {
       window.removeEventListener('mouseup', onGlobalMouseUp);
 
       const c = getDeviceCoords(ev.clientX, ev.clientY);
-      if (c) {
-        sendInput('touch_up', { x: c.x, y: c.y });
+      const endX = c ? c.x : currentX;
+      const endY = c ? c.y : currentY;
+      const duration = performance.now() - startTime;
+      const dy = endY - startY;
+      const dx = endX - startX;
+
+      sendInput('touch_up', { x: endX, y: endY });
+
+      // Fast flick detection for video feeds like TikTok (instant vertical fling)
+      if (duration < 380 && Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx)) {
+        sendInput('swipe', {
+          startX,
+          startY,
+          endX,
+          endY: startY + (dy < 0 ? -650 : 650),
+          durationMs: 140,
+        });
       }
     };
 
@@ -690,6 +735,7 @@ export const DeviceViewerPage: React.FC = () => {
             ref={overlayRef}
             onMouseDown={handleMouseDown}
             onTouchStart={handleTouchStart}
+            onWheel={handleWheel}
             className={`absolute inset-0 z-10 select-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
           />
 

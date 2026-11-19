@@ -179,6 +179,30 @@ function sendShellInput(serial, command) {
   }
 }
 
+function floatToI16FP(f) {
+  const clamped = Math.max(-1, Math.min(1, f));
+  return clamped < 0 ? -Math.round(-clamped * 0x8000) : Math.round(clamped * 0x7fff);
+}
+
+function sendScrcpyScroll(sock, x, y, width = 720, height = 1600, hScroll = 0, vScroll = 0) {
+  try {
+    // 21-byte SC_CONTROL_MSG_TYPE_INJECT_SCROLL_EVENT (type = 3)
+    const msg = Buffer.alloc(21);
+    msg.writeUInt8(3, 0); // type: INJECT_SCROLL_EVENT
+    msg.writeUInt32BE(Math.max(0, Math.min(width, Math.round(x))), 1);
+    msg.writeUInt32BE(Math.max(0, Math.min(height, Math.round(y))), 5);
+    msg.writeUInt16BE(width, 9);
+    msg.writeUInt16BE(height, 11);
+    msg.writeInt16BE(floatToI16FP(hScroll / 128), 13);
+    msg.writeInt16BE(floatToI16FP(vScroll / 128), 15);
+    msg.writeUInt32BE(0, 17); // buttons = 0
+    sock.write(msg);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
   try {
     // 32-byte SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT (type = 2)
@@ -193,7 +217,7 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     msg.writeUInt16BE(height, 20);
     msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
     msg.writeUInt32BE(0, 24); // action_button: 0 for touch events
-    msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons_state
+    msg.writeUInt32BE(0, 28); // buttons_state: 0 for native touchscreen finger events
     sock.write(msg);
     return true;
   } catch (e) {
@@ -236,26 +260,30 @@ async function wakePhone(serial) {
 async function injectInput(serial, action, data) {
   try {
     const sock = controlSockets.get(serial);
-    const dims = deviceDimensions.get(serial) || { width: 720, height: 1600 };
+    const screenWidth = data.width || 720;
+    const screenHeight = data.height || 1600;
 
     if (sock && !sock.destroyed) {
       switch (action) {
         case 'touch_down':
-          sendScrcpyTouch(sock, 0, data.x, data.y, dims.width, dims.height);
+          sendScrcpyTouch(sock, 0, data.x, data.y, screenWidth, screenHeight);
           return true;
         case 'touch_move':
-          sendScrcpyTouch(sock, 2, data.x, data.y, dims.width, dims.height);
+          sendScrcpyTouch(sock, 2, data.x, data.y, screenWidth, screenHeight);
           return true;
         case 'touch_up':
-          sendScrcpyTouch(sock, 1, data.x, data.y, dims.width, dims.height);
+          sendScrcpyTouch(sock, 1, data.x, data.y, screenWidth, screenHeight);
+          return true;
+        case 'scroll':
+          sendScrcpyScroll(sock, data.x, data.y, screenWidth, screenHeight, data.hScroll || 0, data.vScroll || 0);
           return true;
         case 'tap':
-          sendScrcpyTouch(sock, 0, data.x, data.y, dims.width, dims.height);
+          sendScrcpyTouch(sock, 0, data.x, data.y, screenWidth, screenHeight);
           setTimeout(() => {
             if (controlSockets.has(serial)) {
-              sendScrcpyTouch(controlSockets.get(serial), 1, data.x, data.y, dims.width, dims.height);
+              sendScrcpyTouch(controlSockets.get(serial), 1, data.x, data.y, screenWidth, screenHeight);
             }
-          }, 40);
+          }, 35);
           return true;
         case 'back':
           sendScrcpyKeycode(sock, 4); // AKEYCODE_BACK
@@ -271,6 +299,13 @@ async function injectInput(serial, action, data) {
 
     // Fallback via high-speed interactive shell
     switch (action) {
+      case 'scroll': {
+        const v = data.vScroll || 0;
+        const startY = v < 0 ? 1100 : 500;
+        const endY = v < 0 ? 400 : 1200;
+        sendShellInput(serial, `input swipe 360 ${startY} 360 ${endY} 150`);
+        return true;
+      }
       case 'tap': {
         const x = Math.round(data.x);
         const y = Math.round(data.y);
