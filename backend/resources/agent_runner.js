@@ -332,6 +332,13 @@ async function injectInput(serial, action, data) {
                   const s2 = controlSockets.get(serial);
                   sendScrcpyTouch(s2, 2, ex, ey, targetW, targetH);
                   sendScrcpyTouch(s2, 1, ex, ey, targetW, targetH);
+                  // Refresh settled frame after swipe completes
+                  setTimeout(() => {
+                    const ctrl = controlSockets.get(serial);
+                    if (ctrl && !ctrl.destroyed) {
+                      try { ctrl.write(Buffer.from([17])); } catch (e) {}
+                    }
+                  }, 180);
                 }
               }, 30);
             }
@@ -340,12 +347,30 @@ async function injectInput(serial, action, data) {
         }
         case 'back':
           sendScrcpyKeycode(sock, 4); // AKEYCODE_BACK
+          setTimeout(() => {
+            const ctrl = controlSockets.get(serial);
+            if (ctrl && !ctrl.destroyed) {
+              try { ctrl.write(Buffer.from([17])); } catch (e) {}
+            }
+          }, 250);
           return true;
         case 'home':
           sendScrcpyKeycode(sock, 3); // AKEYCODE_HOME
+          setTimeout(() => {
+            const ctrl = controlSockets.get(serial);
+            if (ctrl && !ctrl.destroyed) {
+              try { ctrl.write(Buffer.from([17])); } catch (e) {}
+            }
+          }, 250);
           return true;
         case 'recents':
           sendScrcpyKeycode(sock, 187); // AKEYCODE_APP_SWITCH
+          setTimeout(() => {
+            const ctrl = controlSockets.get(serial);
+            if (ctrl && !ctrl.destroyed) {
+              try { ctrl.write(Buffer.from([17])); } catch (e) {}
+            }
+          }, 250);
           return true;
       }
     }

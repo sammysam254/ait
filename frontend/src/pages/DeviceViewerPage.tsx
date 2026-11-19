@@ -145,6 +145,27 @@ export const DeviceViewerPage: React.FC = () => {
     };
   }, []);
 
+  // Prevent multiple background tabs from echoing / playing duplicate audio
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        if (audioCtxRef.current && audioCtxRef.current.state === 'running') {
+          audioCtxRef.current.suspend().catch(() => {});
+        }
+      } else {
+        if (!isMuted && audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume().catch(() => {});
+        }
+        if (videoRef.current && videoRef.current.buffered.length > 0) {
+          const live = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
+          videoRef.current.currentTime = Math.max(0, live - 0.01);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [isMuted]);
+
   const stopAudio = () => {
     setIsMuted(true);
     if (audioCtxRef.current && audioCtxRef.current.state === 'running') {
@@ -421,13 +442,13 @@ export const DeviceViewerPage: React.FC = () => {
               if (!initialLiveJumpRef.current && liveEdge > 0.05) {
                 videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
                 initialLiveJumpRef.current = true;
-              } else if (drift > 0.45 && !videoRef.current.seeking) {
-                // Hard seek only if lag exceeds 450ms
+              } else if (drift > 0.25 && !videoRef.current.seeking) {
+                // Hard seek only if lag exceeds 250ms
                 videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
-              } else if (drift > 0.12) {
-                // Fast catchup rate
-                videoRef.current.playbackRate = 1.4;
-              } else if (drift < 0.05) {
+              } else if (drift > 0.08) {
+                // Smooth catchup rate
+                videoRef.current.playbackRate = 1.35;
+              } else if (drift < 0.03) {
                 videoRef.current.playbackRate = 1.0;
               }
             }
