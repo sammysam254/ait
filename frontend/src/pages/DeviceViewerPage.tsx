@@ -295,10 +295,14 @@ export const DeviceViewerPage: React.FC = () => {
           node: videoRef.current,
           mode: 'video',
           flushingTime: 0,
-          fps: 60,
-          clearBuffer: false,
+          fps: 30,
+          clearBuffer: true,
           debug: false,
         });
+        // Stop JMuxer internal timer to disable its buggy cancelDelay() that seeks back to buffer range 0
+        if (typeof jmuxerRef.current.stopInterval === 'function') {
+          jmuxerRef.current.stopInterval();
+        }
       } catch (err) {
         console.warn('[JMuxer init warning]', err);
       }
@@ -408,16 +412,13 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Smooth live-edge catch-up without video freezing or stuttering
+            // Real-time zero-latency sync with physical device:
+            // ALWAYS snap directly to the live edge so the stream is in exact real time!
             if (videoRef.current && videoRef.current.buffered.length > 0) {
-              const bufEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
-              const drift = bufEnd - videoRef.current.currentTime;
-              if (drift > 2.0 && !videoRef.current.seeking) {
-                videoRef.current.currentTime = Math.max(0, bufEnd - 0.05);
-              } else if (drift > 0.25) {
-                videoRef.current.playbackRate = 1.15;
-              } else if (drift < 0.08) {
-                videoRef.current.playbackRate = 1.0;
+              const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
+              const drift = liveEdge - videoRef.current.currentTime;
+              if (drift > 0.06 && !videoRef.current.seeking) {
+                videoRef.current.currentTime = liveEdge;
               }
             }
           } catch (e) {

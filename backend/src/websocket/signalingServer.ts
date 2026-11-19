@@ -218,9 +218,10 @@ export class SignalingServer {
             }
             for (const viewer of targetRoom.viewers) {
               if (viewer.ws.readyState === WebSocket.OPEN) {
-                if (viewer.ws.bufferedAmount > 256 * 1024 && !isConfig) {
-                  continue; // Skip delta frame on congested socket to prevent Cloudflare edge drop (code: 1006)
-                }
+                // Generous 2MB headroom for video; drop audio first if congested
+                const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
+                if (isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
+                if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 2 * 1024 * 1024) continue;
                 viewer.ws.send(videoPayload);
                 forwarded++;
               }
@@ -241,9 +242,9 @@ export class SignalingServer {
                 }
                 for (const viewer of r.viewers) {
                   if (viewer.ws.readyState === WebSocket.OPEN) {
-                    if (viewer.ws.bufferedAmount > 256 * 1024 && !isConfig) {
-                      continue; // Skip delta frame on congested socket to prevent Cloudflare edge drop (code: 1006)
-                    }
+                    const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
+                    if (isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
+                    if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 2 * 1024 * 1024) continue;
                     viewer.ws.send(videoPayload);
                     forwarded++;
                   }
