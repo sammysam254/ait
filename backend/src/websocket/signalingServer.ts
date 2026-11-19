@@ -214,6 +214,9 @@ export class SignalingServer {
             }
             for (const viewer of targetRoom.viewers) {
               if (viewer.ws.readyState === WebSocket.OPEN) {
+                if (viewer.ws.bufferedAmount > 256 * 1024 && !isConfig) {
+                  continue; // Skip delta frame on congested socket to prevent Cloudflare edge drop (code: 1006)
+                }
                 viewer.ws.send(videoPayload);
                 forwarded++;
               }
@@ -231,6 +234,9 @@ export class SignalingServer {
                 }
                 for (const viewer of r.viewers) {
                   if (viewer.ws.readyState === WebSocket.OPEN) {
+                    if (viewer.ws.bufferedAmount > 256 * 1024 && !isConfig) {
+                      continue; // Skip delta frame on congested socket to prevent Cloudflare edge drop (code: 1006)
+                    }
                     viewer.ws.send(videoPayload);
                     forwarded++;
                   }
@@ -409,8 +415,8 @@ export class SignalingServer {
               room.agent = agentSession;
               agentSession.ws.send(JSON.stringify({
                 type: 'control-input',
-                deviceId,
-                serial,
+                deviceId: msg.deviceId || deviceId,
+                serial: serial || (dev ? dev.adb_serial : ''),
                 action: msg.action,
                 data: msg.data,
               }));

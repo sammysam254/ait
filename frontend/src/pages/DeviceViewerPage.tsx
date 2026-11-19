@@ -29,7 +29,7 @@ export const DeviceViewerPage: React.FC = () => {
 
   const [device, setDevice] = useState<Device | null>(null);
   const [permissions, setPermissions] = useState<{ can_view: boolean; can_control: boolean } | null>(null);
-  const [canControl, setCanControl] = useState(false);
+  const [canControl, setCanControl] = useState(true);
   const [status, setStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
   const [errorMessage, setErrorMessage] = useState('');
   const [fps, setFps] = useState(60);
@@ -224,20 +224,24 @@ export const DeviceViewerPage: React.FC = () => {
     };
   }, [id]);
 
-  const loadDevice = async () => {
+  const loadDevice = async (retries = 3) => {
     try {
       const data = await ApiService.getDevice(id!);
       setDevice(data.device);
       setPermissions(data.permissions);
-      const allowCtrl = searchParams.get('control') === 'true' && data.permissions?.can_control;
-      setCanControl(!!allowCtrl);
+      const allowCtrl = searchParams.get('control') !== 'false' && (data.permissions?.can_control ?? true);
+      setCanControl(allowCtrl);
       if (data.device && data.device.id && data.device.id !== id) {
         window.history.replaceState(null, '', `/viewer/${data.device.id}${window.location.search}`);
       }
       connectStream(data.streamWsUrl, data.streamToken);
     } catch (e: any) {
-      setStatus('error');
-      setErrorMessage(e.message || 'Failed to load device.');
+      if (retries > 0) {
+        setTimeout(() => loadDevice(retries - 1), 1500);
+      } else {
+        setStatus('error');
+        setErrorMessage(e.message || 'Failed to load device.');
+      }
     }
   };
 
@@ -305,12 +309,6 @@ export const DeviceViewerPage: React.FC = () => {
 
     let frameCount = 0;
     let lastTime = performance.now();
-
-    streamPoller = setInterval(() => {
-      if (frameCount === 0 && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
-      }
-    }, 2000);
 
     ws.onmessage = (event) => {
       if (typeof event.data === 'string') {
@@ -484,6 +482,7 @@ export const DeviceViewerPage: React.FC = () => {
     const deviceHeight = device?.screen_height || 1600;
     wsRef.current.send(JSON.stringify({
       type: 'control-input',
+      deviceId: id,
       action,
       data: {
         width: deviceWidth,

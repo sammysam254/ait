@@ -196,6 +196,43 @@ class InMemoryDatabase {
       details: { superAdmin: 'sammyseth260@gmail.com', mode: 'production' },
       created_at: new Date().toISOString(),
     });
+
+    const defaultAgentId = 'ad04bbf5-6db8-4728-a47a-503ecdb5ef9f';
+    this.agents.set(defaultAgentId, {
+      id: defaultAgentId,
+      organization_id: adminOrgId,
+      computer_name: 'Windows Host Agent',
+      os_version: 'Windows 11',
+      arch: 'x64',
+      agent_version: '1.0.0',
+      ip_address: '127.0.0.1',
+      status: 'online',
+      auth_token_hash: '',
+      last_heartbeat: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    const defaultDevId = 'a956840e-6066-43d5-b49b-88e1aa827172';
+    this.devices.set(defaultDevId, {
+      id: defaultDevId,
+      organization_id: adminOrgId,
+      agent_id: defaultAgentId,
+      adb_serial: 'R8YWA0A09JW',
+      device_name: 'samsung SM-A042F',
+      model: 'SM-A042F',
+      manufacturer: 'samsung',
+      android_version: '14',
+      sdk_version: 34,
+      screen_width: 720,
+      screen_height: 1600,
+      screen_density: 300,
+      connection_type: 'usb',
+      status: 'online',
+      last_seen: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
   }
 }
 
