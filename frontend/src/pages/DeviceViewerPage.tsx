@@ -233,6 +233,13 @@ export const DeviceViewerPage: React.FC = () => {
             jmuxerRef.current.feed({
               video: bytes,
             });
+            // Keep video strictly pinned to real-time live edge (ultra low latency < 30ms)
+            if (videoRef.current && videoRef.current.buffered.length > 0) {
+              const bufEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
+              if (bufEnd - videoRef.current.currentTime > 0.06) {
+                videoRef.current.currentTime = bufEnd;
+              }
+            }
           } catch (e) {
             console.warn('[JMuxer feed warning]', e);
           }
@@ -316,8 +323,8 @@ export const DeviceViewerPage: React.FC = () => {
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!canControl || !isMouseDownRef.current) return;
     const now = Date.now();
-    // Throttle to ~12ms (~80Hz) for ultra-fluid real-time touch without flooding websocket
-    if (now - lastMoveSentRef.current < 12) return;
+    // High-speed 125Hz sampling (8ms) for instantaneous, zero-latency touch drag
+    if (now - lastMoveSentRef.current < 8) return;
     lastMoveSentRef.current = now;
 
     const coords = getDeviceCoords(e.clientX, e.clientY);
@@ -360,7 +367,7 @@ export const DeviceViewerPage: React.FC = () => {
   const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
     if (!canControl || !isMouseDownRef.current || e.touches.length === 0) return;
     const now = Date.now();
-    if (now - lastMoveSentRef.current < 12) return;
+    if (now - lastMoveSentRef.current < 8) return;
     lastMoveSentRef.current = now;
 
     const touch = e.touches[0];

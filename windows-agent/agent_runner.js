@@ -192,7 +192,7 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     msg.writeUInt16BE(width, 18);
     msg.writeUInt16BE(height, 20);
     msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
-    msg.writeUInt32BE(action === 1 ? 0 : 1, 24); // action_button: AMOTION_EVENT_BUTTON_PRIMARY
+    msg.writeUInt32BE(0, 24); // action_button: 0 for touch events
     msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons_state
     sock.write(msg);
     return true;
@@ -513,6 +513,8 @@ function startStream(deviceId, targetSerial) {
           return;
         }
 
+        try { sock.setNoDelay(true); } catch (e) {}
+
         if (!videoSock) {
           videoSock = sock;
           setupVideoSocket(sock);
@@ -522,7 +524,7 @@ function startStream(deviceId, targetSerial) {
         } else if (!controlSock) {
           controlSock = sock;
           controlSockets.set(serial, sock);
-          console.log(`[StreamBridge] 🎮 Native Scrcpy Control channel active for ${serial}`);
+          console.log(`[StreamBridge] 🎮 Native Scrcpy Control channel active for ${serial} (instant no-delay)`);
         }
       });
 
