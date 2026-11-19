@@ -306,6 +306,13 @@ export class SignalingServer {
             }
             break;
           }
+
+          case 'ping': {
+            if (session.ws.readyState === WebSocket.OPEN) {
+              session.ws.send(JSON.stringify({ type: 'pong' }));
+            }
+            break;
+          }
         }
       } catch (err) {
         console.error('[SignalingServer] Error handling agent message:', err);

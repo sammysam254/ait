@@ -213,7 +213,9 @@ class InMemoryDatabase {
       updated_at: new Date().toISOString(),
     });
 
-    const defaultDevId = 'a956840e-6066-43d5-b49b-88e1aa827172';
+    // Use the same stable ID that syncAgentDevices generates via uuidv5(orgId+':'+serial, VERTEX_NAMESPACE)
+    // uuidv5('aaaa0000-0000-0000-0000-000000000001:R8YWA0A09JW', '6ba7b810-9dad-11d1-80b4-00c04fd430c8') = 4a757ef5-da19-56ce-929a-3d08aff71cdb
+    const defaultDevId = '4a757ef5-da19-56ce-929a-3d08aff71cdb';
     this.devices.set(defaultDevId, {
       id: defaultDevId,
       organization_id: adminOrgId,

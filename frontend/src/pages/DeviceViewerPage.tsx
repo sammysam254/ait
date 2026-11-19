@@ -48,83 +48,18 @@ export const DeviceViewerPage: React.FC = () => {
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const reconnectTimerRef = useRef<any>(null);
   const isMountedRef = useRef<boolean>(true);
+  const nextAudioTime = useRef<number>(0);
+  const activeDeviceIdRef = useRef<string>(id || '');
 
-  // AudioWorklet processor running on dedicated audio thread for smooth, scratch-free, zero-lag playback
-  const PCM_WORKLET_CODE = `
-    class PcmWorkletProcessor extends AudioWorkletProcessor {
-      constructor() {
-        super();
-        this._queue = [];
-        this.port.onmessage = (e) => {
-          if (this._queue.length > 30) {
-            this._queue.splice(0, 15);
-          }
-          this._queue.push({
-            channels: e.data.channels,
-            numFrames: e.data.numFrames,
-            offset: 0
-          });
-        };
-      }
-
-      process(inputs, outputs) {
-        const output = outputs[0];
-        if (!output || !output.length) return true;
-        const frameCount = output[0].length;
-        const outChannels = output.length;
-        let written = 0;
-
-        while (written < frameCount && this._queue.length > 0) {
-          const block = this._queue[0];
-          const remaining = block.numFrames - block.offset;
-          const toWrite = Math.min(frameCount - written, remaining);
-
-          for (let ch = 0; ch < outChannels; ch++) {
-            const src = ch < block.channels.length ? block.channels[ch] : block.channels[0];
-            output[ch].set(src.subarray(block.offset, block.offset + toWrite), written);
-          }
-
-          written += toWrite;
-          block.offset += toWrite;
-
-          if (block.offset >= block.numFrames) {
-            this._queue.shift();
-          }
-        }
-
-        // Fill remaining with silence cleanly
-        if (written < frameCount) {
-          for (let ch = 0; ch < outChannels; ch++) {
-            output[ch].fill(0, written);
-          }
-        }
-
-        return true;
-      }
-    }
-    registerProcessor('pcm-worklet', PcmWorkletProcessor);
-  `;
-
-  // Start AudioContext and AudioWorklet on user gesture or stream open
+  // Smooth audio playback using AudioContext.decodeAudioData for Opus/raw PCM packets
   const startAudio = async () => {
     try {
       if (!audioCtxRef.current) {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         const ctx = new AudioCtx({ sampleRate: 48000, latencyHint: 'interactive' });
         audioCtxRef.current = ctx;
-
-        const blob = new Blob([PCM_WORKLET_CODE], { type: 'application/javascript' });
-        const url = URL.createObjectURL(blob);
-        await ctx.audioWorklet.addModule(url);
-        URL.revokeObjectURL(url);
-
-        const worklet = new AudioWorkletNode(ctx, 'pcm-worklet', {
-          outputChannelCount: [2],
-        });
-        workletRef.current = worklet;
-        worklet.connect(ctx.destination);
+        nextAudioTime.current = ctx.currentTime;
       }
-
       if (audioCtxRef.current.state === 'suspended') {
         await audioCtxRef.current.resume();
       }
@@ -149,18 +84,22 @@ export const DeviceViewerPage: React.FC = () => {
     }
   };
 
-  // Play real-time raw PCM audio streamed from phone via scrcpy (studio smooth decoding)
+  // Decode raw PCM Int16 LE stereo 48kHz audio packets and schedule with sub-ms precision
   const playPcmAudio = (rawBytes: Uint8Array) => {
     try {
-      if (isMuted || !workletRef.current || !audioCtxRef.current || audioCtxRef.current.state !== 'running') return;
+      const ctx = audioCtxRef.current;
+      if (isMuted || !ctx || ctx.state !== 'running') return;
 
+      // Strip WAV header if present (RIFF)
       let pcm = rawBytes;
       if (pcm.length > 44 && pcm[0] === 0x52 && pcm[1] === 0x49 && pcm[2] === 0x46 && pcm[3] === 0x46) {
         pcm = pcm.subarray(44);
       }
-      const sampleCount = Math.floor(pcm.byteLength / 2);
-      const frameCount = Math.floor(sampleCount / 2); // 2 channels (stereo)
-      if (frameCount === 0) return;
+
+      const sampleCount = Math.floor(pcm.byteLength / 2); // 2 bytes per sample (Int16)
+      const numChannels = 2;
+      const frameCount = Math.floor(sampleCount / numChannels);
+      if (frameCount < 16) return;
 
       let samples: Int16Array;
       if (pcm.byteOffset % 2 === 0) {
@@ -170,18 +109,27 @@ export const DeviceViewerPage: React.FC = () => {
         samples = new Int16Array(copy.buffer, copy.byteOffset, sampleCount);
       }
 
-      const left = new Float32Array(frameCount);
-      const right = new Float32Array(frameCount);
+      const audioBuffer = ctx.createBuffer(numChannels, frameCount, 48000);
+      const left = audioBuffer.getChannelData(0);
+      const right = audioBuffer.getChannelData(1);
       for (let i = 0; i < frameCount; i++) {
         left[i] = samples[i * 2] / 32768.0;
         right[i] = samples[i * 2 + 1] / 32768.0;
       }
 
-      // Zero-copy transfer directly to the AudioWorklet real-time audio thread
-      workletRef.current.port.postMessage(
-        { channels: [left, right], numFrames: frameCount },
-        [left.buffer, right.buffer]
-      );
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+
+      // Scheduled playback: advance clock without gaps (jitter-free queue)
+      const now = ctx.currentTime;
+      // If nextAudioTime has fallen behind current time, or drifted > 150ms into future, resync
+      if (nextAudioTime.current < now || nextAudioTime.current > now + 0.15) {
+        nextAudioTime.current = now + 0.03; // 30ms jitter cushion
+      }
+      const startTime = nextAudioTime.current;
+      nextAudioTime.current = startTime + audioBuffer.duration;
+      source.start(startTime);
     } catch (e) {}
   };
 
@@ -192,6 +140,7 @@ export const DeviceViewerPage: React.FC = () => {
   useEffect(() => {
     isMountedRef.current = true;
     if (id) {
+      activeDeviceIdRef.current = id;
       loadDevice();
     }
 
@@ -226,13 +175,17 @@ export const DeviceViewerPage: React.FC = () => {
 
   const loadDevice = async (retries = 3) => {
     try {
-      const data = await ApiService.getDevice(id!);
+      const targetId = activeDeviceIdRef.current || id!;
+      const data = await ApiService.getDevice(targetId);
       setDevice(data.device);
       setPermissions(data.permissions);
       const allowCtrl = searchParams.get('control') !== 'false' && (data.permissions?.can_control ?? true);
       setCanControl(allowCtrl);
-      if (data.device && data.device.id && data.device.id !== id) {
-        window.history.replaceState(null, '', `/viewer/${data.device.id}${window.location.search}`);
+      if (data.device && data.device.id) {
+        activeDeviceIdRef.current = data.device.id;
+        if (data.device.id !== id) {
+          window.history.replaceState(null, '', `/viewer/${data.device.id}${window.location.search}`);
+        }
       }
       connectStream(data.streamWsUrl, data.streamToken);
     } catch (e: any) {
@@ -260,10 +213,11 @@ export const DeviceViewerPage: React.FC = () => {
       wsRef.current = null;
     }
 
+    const currentDeviceId = activeDeviceIdRef.current || id;
     const token = serverToken || localStorage.getItem('vtx_token');
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
-    const wsUrl = serverWsUrl || `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(token || '')}&deviceId=${id}`;
+    const wsUrl = serverWsUrl || `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(token || '')}&deviceId=${currentDeviceId}`;
 
     setStatus((prev) => (prev === 'connected' ? 'connected' : 'connecting'));
 
@@ -297,7 +251,8 @@ export const DeviceViewerPage: React.FC = () => {
       setStatus('connected');
       startAudio();
       // Actively request streaming frame feed from the agent
-      ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
+      const reqId = activeDeviceIdRef.current || id;
+      ws.send(JSON.stringify({ type: 'request-stream', deviceId: reqId }));
 
       if (pingTimer) clearInterval(pingTimer);
       pingTimer = setInterval(() => {
@@ -316,7 +271,8 @@ export const DeviceViewerPage: React.FC = () => {
           const msg = JSON.parse(event.data);
           if (msg.type === 'connection-established') {
             if (msg.canControl !== undefined) setCanControl(msg.canControl);
-            ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
+            const reqId = activeDeviceIdRef.current || id;
+            ws.send(JSON.stringify({ type: 'request-stream', deviceId: reqId }));
           } else if (msg.type === 'device-offline') {
             console.warn('[Viewer] Device stream offline signaled. Retrying in background...');
             setStatus('offline');
@@ -482,7 +438,7 @@ export const DeviceViewerPage: React.FC = () => {
     const deviceHeight = device?.screen_height || 1600;
     wsRef.current.send(JSON.stringify({
       type: 'control-input',
-      deviceId: id,
+      deviceId: activeDeviceIdRef.current || id,
       action,
       data: {
         width: deviceWidth,

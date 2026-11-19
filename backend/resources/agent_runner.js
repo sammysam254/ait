@@ -209,7 +209,7 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     const msg = Buffer.alloc(32);
     msg.writeUInt8(2, 0); // type: INJECT_TOUCH_EVENT
     msg.writeUInt8(action, 1); // 0=DOWN, 1=UP, 2=MOVE
-    msg.writeBigUInt64BE(0xfffffffffffffffen, 2); // SC_POINTER_ID_GENERIC_FINGER (UINT64_C(-2))
+    msg.writeBigUInt64BE(BigInt('0xFFFFFFFFFFFFFFFE'), 2); // SC_POINTER_ID_GENERIC_FINGER (UINT64_C(-2))
     msg.writeUInt32BE(Math.max(0, Math.min(width, Math.round(x))), 10);
     msg.writeUInt32BE(Math.max(0, Math.min(height, Math.round(y))), 14);
     msg.writeUInt16BE(width, 18);
@@ -397,7 +397,13 @@ function connectWebSocket() {
       if (pingInterval) clearInterval(pingInterval);
       pingInterval = setInterval(() => {
         if (ws && ws.readyState === 1) {
-          try { ws.ping(); } catch (e) {}
+          try {
+            if (typeof ws.ping === 'function') {
+              ws.ping();
+            } else {
+              ws.send(JSON.stringify({ type: 'ping' }));
+            }
+          } catch (e) {}
         }
       }, 15000);
 
@@ -425,7 +431,7 @@ function connectWebSocket() {
     ws.onclose = (e) => {
       if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
       console.warn(`[StreamBridge] 🟡 WebSocket disconnected (code: ${e.code || 'closed'}). Reconnecting in 3s...`);
-      stopAllStreams();
+      // DO NOT stop scrcpy streams on WS disconnect — keep video pipeline alive for seamless viewer reconnects
       scheduleReconnect();
     };
 
@@ -671,34 +677,43 @@ function startStream(deviceId, targetSerial) {
       function setupAudioSocket(sock) {
         let buf = Buffer.alloc(0);
         let parsedAudioHeader = false;
+        let audioChannels = 2;
+        let lastAudioTime = Date.now();
 
         sock.on('data', (chunk) => {
           if (!active) return;
           buf = Buffer.concat([buf, chunk]);
 
           if (!parsedAudioHeader && buf.length >= 4) {
-            const codec = buf.subarray(0, 4).toString('utf8');
-            console.log(`[StreamBridge] 🔊 Scrcpy Audio Ready [codec: ${codec}]`);
+            const codec = buf.subarray(0, 4).toString('utf8').replace(/\0/g, '');
+            console.log(`[StreamBridge] 🔊 Scrcpy Audio Ready [codec: ${codec || 'raw'}]`);
             buf = buf.subarray(4);
             parsedAudioHeader = true;
           }
 
           if (parsedAudioHeader) {
             while (buf.length >= 12) {
+              const rawHeader = buf.readBigUInt64BE(0);
+              const isConfig = (rawHeader & 0x8000000000000000n) !== 0n; // bit 63 is config in scrcpy v3
               const size = buf.readUInt32BE(8);
+
               if (buf.length < 12 + size) {
-                break;
+                break; // Wait for full packet
               }
+
               const audioData = buf.subarray(12, 12 + size);
               buf = buf.subarray(12 + size);
 
-              if (ws && ws.readyState === 1 && audioData.length > 0) {
-                // Audio backpressure protection
-                if (ws.bufferedAmount < 512 * 1024) {
-                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-                  if (targetDevId) {
-                    ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
-                  }
+              // Skip config packets (codec init data, not audio)
+              if (isConfig || audioData.length === 0) continue;
+
+              // Throttle audio: skip if WS is congested (> 128KB buffered) to prevent stream drops
+              if (ws && ws.readyState === 1 && ws.bufferedAmount < 128 * 1024) {
+                const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                if (targetDevId) {
+                  const now = Date.now();
+                  lastAudioTime = now;
+                  ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
                 }
               }
             }
@@ -724,7 +739,7 @@ function startStream(deviceId, targetSerial) {
         'control=true',
         'audio=true',
         'audio_codec=raw',
-        'video_codec_options=i-frame-interval:int=1',
+        'video_codec_options=i-frame-interval:int=2',
       ]);
 
       scrcpyProc.stdout.on('data', (d) => {
