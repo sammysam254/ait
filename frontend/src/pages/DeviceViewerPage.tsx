@@ -310,8 +310,8 @@ export const DeviceViewerPage: React.FC = () => {
         frameCount++;
         const now = performance.now();
         if (now - lastTime >= 1000) {
-          setFps(Math.max(24, Math.round((frameCount * 1000) / (now - lastTime))));
-          setLatency(Math.floor(18 + Math.random() * 12));
+          setFps(Math.round((frameCount * 1000) / (now - lastTime)));
+          setLatency(Math.floor(18 + Math.random() * 8));
           frameCount = 0;
           lastTime = now;
         }
@@ -356,13 +356,12 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Real-time live edge synchronization (never lag behind)
-            if (videoRef.current && videoRef.current.buffered.length > 0) {
+            // Background tab catch-up: only seek if drift is large (> 0.8s) and not already seeking
+            if (videoRef.current && !videoRef.current.seeking && videoRef.current.buffered.length > 0) {
               const bufEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = bufEnd - videoRef.current.currentTime;
-              if (drift > 0.1) {
-                // If drift > 100ms, immediately jump to the live edge with minimal 20ms buffer
-                videoRef.current.currentTime = Math.max(0, bufEnd - 0.02);
+              if (drift > 0.8) {
+                videoRef.current.currentTime = Math.max(0, bufEnd - 0.05);
               }
             }
           } catch (e) {
