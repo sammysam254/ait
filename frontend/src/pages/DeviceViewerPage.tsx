@@ -413,12 +413,16 @@ export const DeviceViewerPage: React.FC = () => {
             }
 
             // Real-time zero-latency sync with physical device:
-            // ALWAYS snap directly to the live edge so the stream is in exact real time!
+            // Smoothly adapt playbackRate so frames display without seeking-induced pauses
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
-              if (drift > 0.06 && !videoRef.current.seeking) {
-                videoRef.current.currentTime = liveEdge;
+              if (drift > 2.5 && !videoRef.current.seeking) {
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.02);
+              } else if (drift > 0.18) {
+                videoRef.current.playbackRate = 1.25;
+              } else if (drift < 0.06) {
+                videoRef.current.playbackRate = 1.0;
               }
             }
           } catch (e) {

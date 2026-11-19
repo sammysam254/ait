@@ -997,15 +997,6 @@ discoverAndSync();
 setInterval(discoverAndSync, 3000);
 setInterval(sendHeartbeat, 10000);
 
-// Periodic Keyframe refresh (scrcpy TYPE_RESET_VIDEO 17) every 4s to maintain crystal-clear frame stream
-setInterval(() => {
-  for (const [ser, ctrl] of controlSockets.entries()) {
-    if (ctrl && !ctrl.destroyed) {
-      try { ctrl.write(Buffer.from([17])); } catch (e) {}
-    }
-  }
-}, 4000);
-
 console.log('===============================================================================');
 console.log('       🟢 VERTEX SAAS AGENT IS OPERATIONAL & MONITORING LIVE ACTIVITY          ');
 console.log('===============================================================================');
