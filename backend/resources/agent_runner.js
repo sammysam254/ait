@@ -227,7 +227,7 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     msg.writeUInt16BE(height, 20);
     msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
     msg.writeUInt32BE(0, 24); // action_button: 0 for touch events
-    msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons: 1 when touching, 0 when released
+    msg.writeUInt32BE(0, 28); // buttons: 0 for touch events (Android touchscreen expects 0)
     sock.write(msg);
     return true;
   } catch (e) {
@@ -291,10 +291,6 @@ async function injectInput(serial, action, data) {
 
     const x = scaleX(data.x);
     const y = scaleY(data.y);
-
-    if (action === 'touch_down' || action === 'tap') {
-      wakePhone(serial);
-    }
 
     if (sock && !sock.destroyed) {
       switch (action) {
@@ -499,14 +495,24 @@ function scheduleReconnect() {
 
 async function handleMessage(msg) {
   switch (msg.type) {
-    case 'start-stream': {
+    case 'start-stream':
+    case 'request-stream': {
       const { deviceId, serial } = msg;
       const targetSerial = serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || (activeStreams.keys().next().value) || '';
-      console.log(`[StreamBridge] 📺 Received start-stream request for device: ${deviceId} (${targetSerial})`);
+      console.log(`[StreamBridge] 📺 Received stream request for device: ${deviceId} (${targetSerial})`);
       if (targetSerial) {
-        ensureDeviceAwake(targetSerial);
         if (deviceId) {
           serialToActiveDeviceId.set(targetSerial, deviceId);
+        }
+        // Force scrcpy to produce an immediate fresh IDR keyframe and config packet
+        const ctrl = controlSockets.get(targetSerial);
+        if (ctrl && !ctrl.destroyed) {
+          try { ctrl.write(Buffer.from([17])); } catch (e) {}
+        }
+        const cached = cachedKeyframes.get(targetSerial);
+        if (cached && ws && ws.readyState === 1) {
+          const targetDevId = serialToActiveDeviceId.get(targetSerial) || deviceId;
+          try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), cached])); } catch (e) {}
         }
         startStream(deviceId, targetSerial);
       }
@@ -516,11 +522,15 @@ async function handleMessage(msg) {
     case 'request-keyframe': {
       const { deviceId, serial } = msg;
       const targetSerial = serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || (activeStreams.keys().next().value) || '';
-      const cached = cachedKeyframes.get(targetSerial);
-      if (cached && ws && ws.readyState === 1) {
-        const targetDevId = serialToActiveDeviceId.get(targetSerial) || deviceId;
-        if (targetDevId) {
-          ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), cached]));
+      if (targetSerial) {
+        const ctrl = controlSockets.get(targetSerial);
+        if (ctrl && !ctrl.destroyed) {
+          try { ctrl.write(Buffer.from([17])); } catch (e) {}
+        }
+        const cached = cachedKeyframes.get(targetSerial);
+        if (cached && ws && ws.readyState === 1) {
+          const targetDevId = serialToActiveDeviceId.get(targetSerial) || deviceId;
+          try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), cached])); } catch (e) {}
         }
       }
       break;
@@ -683,20 +693,25 @@ function startStream(deviceId, targetSerial) {
                 if (ws && ws.readyState === 1) {
                   const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
                   if (targetDevId) {
-                    ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), fullKeyframe]));
+                    try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), fullKeyframe])); } catch (e) {}
                   }
                 }
                 framesSent++;
               } else {
-                // Complete delta frame
+                // Delta frames: stream smoothly up to 2MB buffer, recover with instant keyframe if congested
                 if (ws && ws.readyState === 1) {
-                  // Congestion backpressure: if socket has > 256KB buffered, skip delta frame to keep edge smooth
-                  if (ws.bufferedAmount <= 256 * 1024) {
+                  if (ws.bufferedAmount <= 2 * 1024 * 1024) {
                     const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
                     if (targetDevId) {
-                      ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), packetData]));
+                      try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), packetData])); } catch (e) {}
                     }
                     framesSent++;
+                  } else {
+                    // Backpressure: request fresh keyframe from scrcpy to cleanly resume once drained
+                    const ctrl = controlSockets.get(serial);
+                    if (ctrl && !ctrl.destroyed) {
+                      try { ctrl.write(Buffer.from([17])); } catch (e) {}
+                    }
                   }
                 }
               }
@@ -704,7 +719,7 @@ function startStream(deviceId, targetSerial) {
               const now = Date.now();
               if (now - lastStatsTime >= 3000) {
                 const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
-                console.log(`[Stream] ⚡ scrcpy pure 60 FPS hardware stream: ~${fps} FPS | ${serial}`);
+                console.log(`[Stream] ⚡ scrcpy hardware stream: ~${fps} FPS | ${serial}`);
                 framesSent = 0;
                 lastStatsTime = now;
               }
@@ -721,8 +736,6 @@ function startStream(deviceId, targetSerial) {
       function setupAudioSocket(sock) {
         let buf = Buffer.alloc(0);
         let parsedAudioHeader = false;
-        let audioChannels = 2;
-        let lastAudioTime = Date.now();
 
         sock.on('data', (chunk) => {
           if (!active) return;
@@ -738,7 +751,7 @@ function startStream(deviceId, targetSerial) {
           if (parsedAudioHeader) {
             while (buf.length >= 12) {
               const rawHeader = buf.readBigUInt64BE(0);
-              const isConfig = (rawHeader & 0x8000000000000000n) !== 0n; // bit 63 is config in scrcpy v3
+              const isConfig = (rawHeader & 0x8000000000000000n) !== 0n;
               const size = buf.readUInt32BE(8);
 
               if (buf.length < 12 + size) {
@@ -748,14 +761,14 @@ function startStream(deviceId, targetSerial) {
               const audioData = buf.subarray(12, 12 + size);
               buf = buf.subarray(12 + size);
 
-              // Skip config packets (codec init data, not audio)
+              // Skip config packets
               if (isConfig || audioData.length === 0) continue;
 
-              // Audio packets are tiny (~16KB/s) and must never be dropped to prevent clicks/scratches
-              if (ws && ws.readyState === 1) {
+              // Audio backpressure: shed audio if buffer > 128KB to always preserve video frame fluidity
+              if (ws && ws.readyState === 1 && ws.bufferedAmount <= 128 * 1024) {
                 const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
                 if (targetDevId) {
-                  ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
+                  try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData])); } catch (e) {}
                 }
               }
             }
@@ -765,7 +778,7 @@ function startStream(deviceId, targetSerial) {
         sock.on('error', () => {});
       }
 
-      // 5. Spawn scrcpy-server with smooth 60 FPS profile (4 Mbps, 1200px bounds, stay_awake=true)
+      // 5. Spawn scrcpy-server with rock-solid 30 FPS profile (2 Mbps, 1080px bounds, stay_awake=true)
       scrcpyProc = spawn(adbPath, [
         '-s', serial,
         'shell',
@@ -775,13 +788,13 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'max_size=1200',
-        'video_bit_rate=3500000',
+        'max_size=1080',
+        'max_fps=30',
+        'video_bit_rate=2000000',
         'stay_awake=true',
         'control=true',
         'audio=true',
         'audio_codec=raw',
-        'video_codec_options=i-frame-interval:int=1',
       ]);
 
       scrcpyProc.stdout.on('data', (d) => {
@@ -983,6 +996,15 @@ connectWebSocket();
 discoverAndSync();
 setInterval(discoverAndSync, 3000);
 setInterval(sendHeartbeat, 10000);
+
+// Periodic Keyframe refresh (scrcpy TYPE_RESET_VIDEO 17) every 4s to maintain crystal-clear frame stream
+setInterval(() => {
+  for (const [ser, ctrl] of controlSockets.entries()) {
+    if (ctrl && !ctrl.destroyed) {
+      try { ctrl.write(Buffer.from([17])); } catch (e) {}
+    }
+  }
+}, 4000);
 
 console.log('===============================================================================');
 console.log('       🟢 VERTEX SAAS AGENT IS OPERATIONAL & MONITORING LIVE ACTIVITY          ');

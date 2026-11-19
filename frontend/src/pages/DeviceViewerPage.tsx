@@ -408,12 +408,16 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Background tab catch-up: only seek if drift is large (> 0.8s) and not already seeking
-            if (videoRef.current && !videoRef.current.seeking && videoRef.current.buffered.length > 0) {
+            // Smooth live-edge catch-up without video freezing or stuttering
+            if (videoRef.current && videoRef.current.buffered.length > 0) {
               const bufEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = bufEnd - videoRef.current.currentTime;
-              if (drift > 0.8) {
+              if (drift > 2.0 && !videoRef.current.seeking) {
                 videoRef.current.currentTime = Math.max(0, bufEnd - 0.05);
+              } else if (drift > 0.25) {
+                videoRef.current.playbackRate = 1.15;
+              } else if (drift < 0.08) {
+                videoRef.current.playbackRate = 1.0;
               }
             }
           } catch (e) {
