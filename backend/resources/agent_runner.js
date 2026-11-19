@@ -209,14 +209,14 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     const msg = Buffer.alloc(32);
     msg.writeUInt8(2, 0); // type: INJECT_TOUCH_EVENT
     msg.writeUInt8(action, 1); // 0=DOWN, 1=UP, 2=MOVE
-    msg.writeBigUInt64BE(BigInt('0xFFFFFFFFFFFFFFFE'), 2); // SC_POINTER_ID_GENERIC_FINGER (UINT64_C(-2))
+    msg.writeBigUInt64BE(0n, 2); // pointerId = 0 (standard single-touch pointer ID for Android)
     msg.writeUInt32BE(Math.max(0, Math.min(width, Math.round(x))), 10);
     msg.writeUInt32BE(Math.max(0, Math.min(height, Math.round(y))), 14);
     msg.writeUInt16BE(width, 18);
     msg.writeUInt16BE(height, 20);
     msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
     msg.writeUInt32BE(0, 24); // action_button: 0 for touch events
-    msg.writeUInt32BE(0, 28); // buttons_state: 0 for native touchscreen finger events
+    msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons: 1 when touching, 0 when released
     sock.write(msg);
     return true;
   } catch (e) {
@@ -269,8 +269,17 @@ async function wakePhone(serial) {
 async function injectInput(serial, action, data) {
   try {
     const sock = controlSockets.get(serial);
-    const screenWidth = data.width || 720;
-    const screenHeight = data.height || 1600;
+    const dims = deviceDimensions.get(serial);
+    const targetW = dims ? dims.width : (data.width || 720);
+    const targetH = dims ? dims.height : (data.height || 1600);
+    const srcW = data.width || 720;
+    const srcH = data.height || 1600;
+
+    const scaleX = (x) => Math.round(((x || 0) / srcW) * targetW);
+    const scaleY = (y) => Math.round(((y || 0) / srcH) * targetH);
+
+    const x = scaleX(data.x);
+    const y = scaleY(data.y);
 
     if (action === 'touch_down' || action === 'tap') {
       wakePhone(serial);
@@ -279,25 +288,76 @@ async function injectInput(serial, action, data) {
     if (sock && !sock.destroyed) {
       switch (action) {
         case 'touch_down':
-          sendScrcpyTouch(sock, 0, data.x, data.y, screenWidth, screenHeight);
+          sendScrcpyTouch(sock, 0, x, y, targetW, targetH);
           return true;
         case 'touch_move':
-          sendScrcpyTouch(sock, 2, data.x, data.y, screenWidth, screenHeight);
+          sendScrcpyTouch(sock, 2, x, y, targetW, targetH);
           return true;
         case 'touch_up':
-          sendScrcpyTouch(sock, 1, data.x, data.y, screenWidth, screenHeight);
+          sendScrcpyTouch(sock, 1, x, y, targetW, targetH);
           return true;
-        case 'scroll':
-          sendScrcpyScroll(sock, data.x, data.y, screenWidth, screenHeight, data.hScroll || 0, data.vScroll || 0);
+        case 'scroll': {
+          // Native scrcpy scroll event
+          sendScrcpyScroll(sock, x, y, targetW, targetH, data.hScroll || 0, data.vScroll || 0);
+
+          // ALSO synthesize touch fling gesture for apps like TikTok that ignore mouse scroll
+          const v = data.vScroll || 0;
+          if (Math.abs(v) > 20) {
+            const isDown = v < 0; // scroll down = swipe up (next video)
+            const startY = isDown ? Math.round(targetH * 0.75) : Math.round(targetH * 0.25);
+            const midY = isDown ? Math.round(targetH * 0.45) : Math.round(targetH * 0.55);
+            const endY = isDown ? Math.round(targetH * 0.18) : Math.round(targetH * 0.82);
+            const midX = Math.round(targetW / 2);
+
+            sendScrcpyTouch(sock, 0, midX, startY, targetW, targetH);
+            setTimeout(() => {
+              if (controlSockets.has(serial)) {
+                const s = controlSockets.get(serial);
+                sendScrcpyTouch(s, 2, midX, midY, targetW, targetH);
+                setTimeout(() => {
+                  if (controlSockets.has(serial)) {
+                    const s2 = controlSockets.get(serial);
+                    sendScrcpyTouch(s2, 2, midX, endY, targetW, targetH);
+                    sendScrcpyTouch(s2, 1, midX, endY, targetW, targetH);
+                  }
+                }, 25);
+              }
+            }, 25);
+          }
           return true;
+        }
         case 'tap':
-          sendScrcpyTouch(sock, 0, data.x, data.y, screenWidth, screenHeight);
+          sendScrcpyTouch(sock, 0, x, y, targetW, targetH);
           setTimeout(() => {
             if (controlSockets.has(serial)) {
-              sendScrcpyTouch(controlSockets.get(serial), 1, data.x, data.y, screenWidth, screenHeight);
+              sendScrcpyTouch(controlSockets.get(serial), 1, x, y, targetW, targetH);
             }
           }, 35);
           return true;
+        case 'swipe': {
+          const sx = scaleX(data.startX);
+          const sy = scaleY(data.startY);
+          const ex = scaleX(data.endX);
+          const ey = scaleY(data.endY);
+          const mx = Math.round((sx + ex) / 2);
+          const my = Math.round((sy + ey) / 2);
+
+          sendScrcpyTouch(sock, 0, sx, sy, targetW, targetH);
+          setTimeout(() => {
+            if (controlSockets.has(serial)) {
+              const s = controlSockets.get(serial);
+              sendScrcpyTouch(s, 2, mx, my, targetW, targetH);
+              setTimeout(() => {
+                if (controlSockets.has(serial)) {
+                  const s2 = controlSockets.get(serial);
+                  sendScrcpyTouch(s2, 2, ex, ey, targetW, targetH);
+                  sendScrcpyTouch(s2, 1, ex, ey, targetW, targetH);
+                }
+              }, 30);
+            }
+          }, 30);
+          return true;
+        }
         case 'back':
           sendScrcpyKeycode(sock, 4); // AKEYCODE_BACK
           return true;
@@ -734,12 +794,12 @@ function startStream(deviceId, targetSerial) {
         'log_level=info',
         'cleanup=false',
         'max_size=1200',
-        'video_bit_rate=4000000',
+        'video_bit_rate=3500000',
         'stay_awake=true',
         'control=true',
         'audio=true',
         'audio_codec=raw',
-        'video_codec_options=i-frame-interval:int=2',
+        'video_codec_options=i-frame-interval:int=1',
       ]);
 
       scrcpyProc.stdout.on('data', (d) => {

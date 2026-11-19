@@ -51,7 +51,7 @@ export const DeviceViewerPage: React.FC = () => {
   const nextAudioTime = useRef<number>(0);
   const activeDeviceIdRef = useRef<string>(id || '');
 
-  // Smooth audio playback using AudioContext.decodeAudioData for Opus/raw PCM packets
+  // Smooth audio playback using AudioContext for raw PCM packets
   const startAudio = async () => {
     try {
       if (!audioCtxRef.current) {
@@ -65,9 +65,21 @@ export const DeviceViewerPage: React.FC = () => {
       }
       setIsMuted(false);
     } catch (e) {
-      console.warn('[Audio start error]', e);
+      // AudioContext autoplay warning suppressed
     }
   };
+
+  useEffect(() => {
+    const unlockAudio = () => {
+      startAudio();
+    };
+    window.addEventListener('pointerdown', unlockAudio, { once: true });
+    window.addEventListener('keydown', unlockAudio, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+  }, []);
 
   const stopAudio = () => {
     setIsMuted(true);
@@ -249,7 +261,6 @@ export const DeviceViewerPage: React.FC = () => {
 
     ws.onopen = () => {
       setStatus('connected');
-      startAudio();
       // Actively request streaming frame feed from the agent
       const reqId = activeDeviceIdRef.current || id;
       ws.send(JSON.stringify({ type: 'request-stream', deviceId: reqId }));
@@ -345,13 +356,13 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Smooth live edge synchronization without clock jitter (prevents macroblock artifacts)
+            // Real-time live edge synchronization (never lag behind)
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const bufEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = bufEnd - videoRef.current.currentTime;
-              if (drift > 0.4) {
-                // Large drift (e.g. background tab): gently seek close to live edge with safe 40ms cushion
-                videoRef.current.currentTime = Math.max(0, bufEnd - 0.04);
+              if (drift > 0.1) {
+                // If drift > 100ms, immediately jump to the live edge with minimal 20ms buffer
+                videoRef.current.currentTime = Math.max(0, bufEnd - 0.02);
               }
             }
           } catch (e) {
@@ -451,6 +462,7 @@ export const DeviceViewerPage: React.FC = () => {
   const lastMoveSentRef = useRef(0);
 
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    e.preventDefault();
     if (!canControl) return;
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
@@ -465,6 +477,7 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
     startAudio();
     if (!canControl) return;
     const coords = getDeviceCoords(e.clientX, e.clientY);
@@ -480,10 +493,11 @@ export const DeviceViewerPage: React.FC = () => {
     sendInput('touch_down', { x: startX, y: startY });
 
     const onGlobalMouseMove = (ev: MouseEvent) => {
+      ev.preventDefault();
       if (!isMouseDownRef.current) return;
       const now = performance.now();
-      // Smooth 60Hz sampling (16ms) to prevent TCP congestion and maintain velocity tracking
-      if (now - lastMoveSentRef.current < 16) return;
+      // Smooth 100Hz sampling (10ms) for instant responsiveness
+      if (now - lastMoveSentRef.current < 10) return;
       lastMoveSentRef.current = now;
 
       const c = getDeviceCoords(ev.clientX, ev.clientY);
@@ -495,6 +509,7 @@ export const DeviceViewerPage: React.FC = () => {
     };
 
     const onGlobalMouseUp = (ev: MouseEvent) => {
+      ev.preventDefault();
       if (!isMouseDownRef.current) return;
       isMouseDownRef.current = false;
       window.removeEventListener('mousemove', onGlobalMouseMove);
@@ -510,13 +525,13 @@ export const DeviceViewerPage: React.FC = () => {
       sendInput('touch_up', { x: endX, y: endY });
 
       // Fast flick detection for video feeds like TikTok (instant vertical fling)
-      if (duration < 380 && Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx)) {
+      if (duration < 450 && Math.abs(dy) > 35 && Math.abs(dy) > Math.abs(dx)) {
         sendInput('swipe', {
           startX,
           startY,
           endX,
-          endY: startY + (dy < 0 ? -650 : 650),
-          durationMs: 140,
+          endY: startY + (dy < 0 ? -700 : 700),
+          durationMs: 120,
         });
       }
     };
@@ -526,6 +541,7 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    e.preventDefault();
     startAudio();
     if (!canControl || e.touches.length === 0) return;
     const touch = e.touches[0];
@@ -533,22 +549,32 @@ export const DeviceViewerPage: React.FC = () => {
     if (!coords) return;
 
     isMouseDownRef.current = true;
-    sendInput('touch_down', { x: coords.x, y: coords.y });
+    const startX = coords.x;
+    const startY = coords.y;
+    const startTime = performance.now();
+    let currentX = startX;
+    let currentY = startY;
+
+    sendInput('touch_down', { x: startX, y: startY });
 
     const onGlobalTouchMove = (ev: TouchEvent) => {
+      ev.preventDefault();
       if (!isMouseDownRef.current || ev.touches.length === 0) return;
-      const now = Date.now();
-      if (now - lastMoveSentRef.current < 8) return;
+      const now = performance.now();
+      if (now - lastMoveSentRef.current < 10) return;
       lastMoveSentRef.current = now;
 
       const t = ev.touches[0];
       const c = getDeviceCoords(t.clientX, t.clientY);
       if (c) {
+        currentX = c.x;
+        currentY = c.y;
         sendInput('touch_move', { x: c.x, y: c.y });
       }
     };
 
     const onGlobalTouchEnd = (ev: TouchEvent) => {
+      ev.preventDefault();
       if (!isMouseDownRef.current) return;
       isMouseDownRef.current = false;
       window.removeEventListener('touchmove', onGlobalTouchMove);
@@ -556,13 +582,28 @@ export const DeviceViewerPage: React.FC = () => {
 
       const t = ev.changedTouches[0];
       const c = t ? getDeviceCoords(t.clientX, t.clientY) : null;
-      if (c) {
-        sendInput('touch_up', { x: c.x, y: c.y });
+      const endX = c ? c.x : currentX;
+      const endY = c ? c.y : currentY;
+      const duration = performance.now() - startTime;
+      const dy = endY - startY;
+      const dx = endX - startX;
+
+      sendInput('touch_up', { x: endX, y: endY });
+
+      // Fast flick / swipe detection for mobile (TikTok, reels, feeds)
+      if (duration < 450 && Math.abs(dy) > 35 && Math.abs(dy) > Math.abs(dx)) {
+        sendInput('swipe', {
+          startX,
+          startY,
+          endX,
+          endY: startY + (dy < 0 ? -700 : 700),
+          durationMs: 120,
+        });
       }
     };
 
-    window.addEventListener('touchmove', onGlobalTouchMove);
-    window.addEventListener('touchend', onGlobalTouchEnd);
+    window.addEventListener('touchmove', onGlobalTouchMove, { passive: false });
+    window.addEventListener('touchend', onGlobalTouchEnd, { passive: false });
   };
 
   const toggleFullscreen = () => {
@@ -691,6 +732,7 @@ export const DeviceViewerPage: React.FC = () => {
             onMouseDown={handleMouseDown}
             onTouchStart={handleTouchStart}
             onWheel={handleWheel}
+            style={{ touchAction: 'none' }}
             className={`absolute inset-0 z-10 select-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
           />
 
