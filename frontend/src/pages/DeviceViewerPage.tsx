@@ -48,25 +48,88 @@ export const DeviceViewerPage: React.FC = () => {
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const reconnectTimerRef = useRef<any>(null);
   const isMountedRef = useRef<boolean>(true);
-  const nextAudioTime = useRef<number>(0);
   const activeDeviceIdRef = useRef<string>(id || '');
+  const lastWheelTimeRef = useRef<number>(0);
 
-  // Smooth audio playback using AudioContext for raw PCM packets
+  // High-performance real-time AudioWorklet ring buffer running on the dedicated audio thread
+  const PCM_WORKLET_CODE = `
+    class PcmWorkletProcessor extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this._queue = [];
+        this.port.onmessage = (e) => {
+          if (this._queue.length > 15) {
+            this._queue.splice(0, 5);
+          }
+          this._queue.push({
+            channels: e.data.channels,
+            numFrames: e.data.numFrames,
+            offset: 0
+          });
+        };
+      }
+
+      process(inputs, outputs) {
+        const output = outputs[0];
+        if (!output || !output.length) return true;
+        const frameCount = output[0].length;
+        const outChannels = output.length;
+        let written = 0;
+
+        while (written < frameCount && this._queue.length > 0) {
+          const block = this._queue[0];
+          const remaining = block.numFrames - block.offset;
+          const toWrite = Math.min(frameCount - written, remaining);
+
+          for (let ch = 0; ch < outChannels; ch++) {
+            const src = ch < block.channels.length ? block.channels[ch] : block.channels[0];
+            output[ch].set(src.subarray(block.offset, block.offset + toWrite), written);
+          }
+
+          written += toWrite;
+          block.offset += toWrite;
+
+          if (block.offset >= block.numFrames) {
+            this._queue.shift();
+          }
+        }
+
+        if (written < frameCount) {
+          for (let ch = 0; ch < outChannels; ch++) {
+            output[ch].fill(0, written);
+          }
+        }
+
+        return true;
+      }
+    }
+    registerProcessor('pcm-worklet', PcmWorkletProcessor);
+  `;
+
+  // Smooth audio playback using AudioWorklet on dedicated audio thread (zero popping, zero GC pause)
   const startAudio = async () => {
     try {
       if (!audioCtxRef.current) {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         const ctx = new AudioCtx({ sampleRate: 48000, latencyHint: 'interactive' });
         audioCtxRef.current = ctx;
-        nextAudioTime.current = ctx.currentTime;
+
+        const blob = new Blob([PCM_WORKLET_CODE], { type: 'application/javascript' });
+        const url = URL.createObjectURL(blob);
+        await ctx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+
+        const worklet = new AudioWorkletNode(ctx, 'pcm-worklet', {
+          outputChannelCount: [2],
+        });
+        workletRef.current = worklet;
+        worklet.connect(ctx.destination);
       }
       if (audioCtxRef.current.state === 'suspended') {
         await audioCtxRef.current.resume();
       }
       setIsMuted(false);
-    } catch (e) {
-      // AudioContext autoplay warning suppressed
-    }
+    } catch (e) {}
   };
 
   useEffect(() => {
@@ -96,11 +159,10 @@ export const DeviceViewerPage: React.FC = () => {
     }
   };
 
-  // Decode raw PCM Int16 LE stereo 48kHz audio packets and schedule with sub-ms precision
+  // Decode raw PCM Int16 LE stereo 48kHz audio packets and transfer zero-copy to the AudioWorklet
   const playPcmAudio = (rawBytes: Uint8Array) => {
     try {
-      const ctx = audioCtxRef.current;
-      if (isMuted || !ctx || ctx.state !== 'running') return;
+      if (isMuted || !workletRef.current || !audioCtxRef.current || audioCtxRef.current.state !== 'running') return;
 
       // Strip WAV header if present (RIFF)
       let pcm = rawBytes;
@@ -121,27 +183,17 @@ export const DeviceViewerPage: React.FC = () => {
         samples = new Int16Array(copy.buffer, copy.byteOffset, sampleCount);
       }
 
-      const audioBuffer = ctx.createBuffer(numChannels, frameCount, 48000);
-      const left = audioBuffer.getChannelData(0);
-      const right = audioBuffer.getChannelData(1);
+      const left = new Float32Array(frameCount);
+      const right = new Float32Array(frameCount);
       for (let i = 0; i < frameCount; i++) {
         left[i] = samples[i * 2] / 32768.0;
         right[i] = samples[i * 2 + 1] / 32768.0;
       }
 
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-
-      // Scheduled playback: advance clock without gaps (jitter-free queue)
-      const now = ctx.currentTime;
-      // If nextAudioTime has fallen behind current time, or drifted > 150ms into future, resync
-      if (nextAudioTime.current < now || nextAudioTime.current > now + 0.15) {
-        nextAudioTime.current = now + 0.03; // 30ms jitter cushion
-      }
-      const startTime = nextAudioTime.current;
-      nextAudioTime.current = startTime + audioBuffer.duration;
-      source.start(startTime);
+      workletRef.current.port.postMessage(
+        { channels: [left, right], numFrames: frameCount },
+        [left.buffer, right.buffer]
+      );
     } catch (e) {}
   };
 
@@ -468,15 +520,25 @@ export const DeviceViewerPage: React.FC = () => {
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       if (!canControl) return;
-      const coords = getDeviceCoords(e.clientX, e.clientY);
-      if (!coords) return;
 
-      // e.deltaY > 0 is scroll down (next video in TikTok!), negative is scroll up
-      sendInput('scroll', {
-        x: coords.x,
-        y: coords.y,
-        hScroll: Math.round(e.deltaX),
-        vScroll: Math.round(-e.deltaY),
+      const now = performance.now();
+      // Debounce wheel: 1 clean flick per 350ms to prevent fighting gestures in TikTok/feeds
+      if (now - lastWheelTimeRef.current < 350) return;
+      lastWheelTimeRef.current = now;
+
+      const isDown = e.deltaY > 0;
+      const deviceWidth = device?.screen_width || 720;
+      const deviceHeight = device?.screen_height || 1600;
+      const midX = Math.round(deviceWidth / 2);
+      const startY = isDown ? Math.round(deviceHeight * 0.75) : Math.round(deviceHeight * 0.25);
+      const endY = isDown ? Math.round(deviceHeight * 0.20) : Math.round(deviceHeight * 0.80);
+
+      sendInput('swipe', {
+        startX: midX,
+        startY,
+        endX: midX,
+        endY,
+        durationMs: 100,
       });
     };
 
@@ -528,22 +590,8 @@ export const DeviceViewerPage: React.FC = () => {
       const c = getDeviceCoords(ev.clientX, ev.clientY);
       const endX = c ? c.x : currentX;
       const endY = c ? c.y : currentY;
-      const duration = performance.now() - startTime;
-      const dy = endY - startY;
-      const dx = endX - startX;
 
       sendInput('touch_up', { x: endX, y: endY });
-
-      // Fast flick detection for video feeds like TikTok (instant vertical fling)
-      if (duration < 450 && Math.abs(dy) > 35 && Math.abs(dy) > Math.abs(dx)) {
-        sendInput('swipe', {
-          startX,
-          startY,
-          endX,
-          endY: startY + (dy < 0 ? -700 : 700),
-          durationMs: 120,
-        });
-      }
     };
 
     window.addEventListener('mousemove', onGlobalMouseMove);
@@ -594,22 +642,8 @@ export const DeviceViewerPage: React.FC = () => {
       const c = t ? getDeviceCoords(t.clientX, t.clientY) : null;
       const endX = c ? c.x : currentX;
       const endY = c ? c.y : currentY;
-      const duration = performance.now() - startTime;
-      const dy = endY - startY;
-      const dx = endX - startX;
 
       sendInput('touch_up', { x: endX, y: endY });
-
-      // Fast flick / swipe detection for mobile (TikTok, reels, feeds)
-      if (duration < 450 && Math.abs(dy) > 35 && Math.abs(dy) > Math.abs(dx)) {
-        sendInput('swipe', {
-          startX,
-          startY,
-          endX,
-          endY: startY + (dy < 0 ? -700 : 700),
-          durationMs: 120,
-        });
-      }
     };
 
     window.addEventListener('touchmove', onGlobalTouchMove, { passive: false });

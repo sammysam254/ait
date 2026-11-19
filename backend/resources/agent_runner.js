@@ -296,36 +296,9 @@ async function injectInput(serial, action, data) {
         case 'touch_up':
           sendScrcpyTouch(sock, 1, x, y, targetW, targetH);
           return true;
-        case 'scroll': {
-          // Native scrcpy scroll event
+        case 'scroll':
           sendScrcpyScroll(sock, x, y, targetW, targetH, data.hScroll || 0, data.vScroll || 0);
-
-          // ALSO synthesize touch fling gesture for apps like TikTok that ignore mouse scroll
-          const v = data.vScroll || 0;
-          if (Math.abs(v) > 20) {
-            const isDown = v < 0; // scroll down = swipe up (next video)
-            const startY = isDown ? Math.round(targetH * 0.75) : Math.round(targetH * 0.25);
-            const midY = isDown ? Math.round(targetH * 0.45) : Math.round(targetH * 0.55);
-            const endY = isDown ? Math.round(targetH * 0.18) : Math.round(targetH * 0.82);
-            const midX = Math.round(targetW / 2);
-
-            sendScrcpyTouch(sock, 0, midX, startY, targetW, targetH);
-            setTimeout(() => {
-              if (controlSockets.has(serial)) {
-                const s = controlSockets.get(serial);
-                sendScrcpyTouch(s, 2, midX, midY, targetW, targetH);
-                setTimeout(() => {
-                  if (controlSockets.has(serial)) {
-                    const s2 = controlSockets.get(serial);
-                    sendScrcpyTouch(s2, 2, midX, endY, targetW, targetH);
-                    sendScrcpyTouch(s2, 1, midX, endY, targetW, targetH);
-                  }
-                }, 25);
-              }
-            }, 25);
-          }
           return true;
-        }
         case 'tap':
           sendScrcpyTouch(sock, 0, x, y, targetW, targetH);
           setTimeout(() => {
@@ -767,12 +740,10 @@ function startStream(deviceId, targetSerial) {
               // Skip config packets (codec init data, not audio)
               if (isConfig || audioData.length === 0) continue;
 
-              // Throttle audio: skip if WS is congested (> 128KB buffered) to prevent stream drops
-              if (ws && ws.readyState === 1 && ws.bufferedAmount < 128 * 1024) {
+              // Audio packets are tiny (~16KB/s) and must never be dropped to prevent clicks/scratches
+              if (ws && ws.readyState === 1) {
                 const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
                 if (targetDevId) {
-                  const now = Date.now();
-                  lastAudioTime = now;
                   ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
                 }
               }
