@@ -434,21 +434,16 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Real-time zero-latency sync with physical device:
+            // Smooth live-edge rate pacing without decoder flushes or black screens
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
 
-              if (!initialLiveJumpRef.current && liveEdge > 0.05) {
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
-                initialLiveJumpRef.current = true;
-              } else if (drift > 0.25 && !videoRef.current.seeking) {
-                // Hard seek only if lag exceeds 250ms
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
-              } else if (drift > 0.08) {
-                // Smooth catchup rate
-                videoRef.current.playbackRate = 1.35;
-              } else if (drift < 0.03) {
+              if (drift > 2.0 && !videoRef.current.seeking) {
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.1);
+              } else if (drift > 0.25) {
+                videoRef.current.playbackRate = 1.25;
+              } else if (drift < 0.08) {
                 videoRef.current.playbackRate = 1.0;
               }
             }
@@ -544,13 +539,6 @@ export const DeviceViewerPage: React.FC = () => {
         ...data,
       },
     }));
-
-    if (videoRef.current && videoRef.current.buffered.length > 0) {
-      const live = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
-      if (live - videoRef.current.currentTime > 0.18 && !videoRef.current.seeking) {
-        videoRef.current.currentTime = Math.max(0, live - 0.01);
-      }
-    }
   };
 
   const lastMoveSentRef = useRef(0);
