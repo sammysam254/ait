@@ -518,7 +518,7 @@ export const DeviceViewerPage: React.FC = () => {
     if (!el) return;
 
     const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
+      if (e.cancelable) e.preventDefault();
       if (!canControl) return;
 
       const now = performance.now();
@@ -549,7 +549,7 @@ export const DeviceViewerPage: React.FC = () => {
   }, [canControl, device]);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
     startAudio();
     if (!canControl) return;
     const coords = getDeviceCoords(e.clientX, e.clientY);
@@ -565,7 +565,7 @@ export const DeviceViewerPage: React.FC = () => {
     sendInput('touch_down', { x: startX, y: startY });
 
     const onGlobalMouseMove = (ev: MouseEvent) => {
-      ev.preventDefault();
+      if (ev.cancelable) ev.preventDefault();
       if (!isMouseDownRef.current) return;
       const now = performance.now();
       // Smooth 100Hz sampling (10ms) for instant responsiveness
@@ -581,7 +581,7 @@ export const DeviceViewerPage: React.FC = () => {
     };
 
     const onGlobalMouseUp = (ev: MouseEvent) => {
-      ev.preventDefault();
+      if (ev.cancelable) ev.preventDefault();
       if (!isMouseDownRef.current) return;
       isMouseDownRef.current = false;
       window.removeEventListener('mousemove', onGlobalMouseMove);
@@ -599,7 +599,7 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
     startAudio();
     if (!canControl || e.touches.length === 0) return;
     const touch = e.touches[0];
@@ -616,7 +616,7 @@ export const DeviceViewerPage: React.FC = () => {
     sendInput('touch_down', { x: startX, y: startY });
 
     const onGlobalTouchMove = (ev: TouchEvent) => {
-      ev.preventDefault();
+      if (ev.cancelable) ev.preventDefault();
       if (!isMouseDownRef.current || ev.touches.length === 0) return;
       const now = performance.now();
       if (now - lastMoveSentRef.current < 10) return;
@@ -632,7 +632,7 @@ export const DeviceViewerPage: React.FC = () => {
     };
 
     const onGlobalTouchEnd = (ev: TouchEvent) => {
-      ev.preventDefault();
+      if (ev.cancelable) ev.preventDefault();
       if (!isMouseDownRef.current) return;
       isMouseDownRef.current = false;
       window.removeEventListener('touchmove', onGlobalTouchMove);

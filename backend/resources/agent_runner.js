@@ -7,6 +7,17 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 
+// Single instance lock to prevent duplicate scrcpy capture processes
+const LOCK_PORT = 47155;
+const lockServer = net.createServer();
+lockServer.once('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.warn('[Agent] ⚠️ Another instance of Vertex Host Agent is already running on this machine (Lock port 47155 in use). Terminating duplicate.');
+    process.exit(0);
+  }
+});
+lockServer.listen(LOCK_PORT, '127.0.0.1');
+
 // Global WebSocket fallback for older Node versions
 let WsClient = globalThis.WebSocket;
 if (!WsClient) {

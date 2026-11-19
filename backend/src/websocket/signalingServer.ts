@@ -208,6 +208,10 @@ export class SignalingServer {
           let forwarded = 0;
           const targetRoom = targetDeviceId ? this.deviceRooms.get(targetDeviceId) : null;
           if (targetRoom && targetRoom.viewers.size > 0) {
+            // Producer exclusivity: only forward frames from the room's designated active agent!
+            if (targetRoom.agent && targetRoom.agent !== session) {
+              return; // Drop duplicate frames from superseded or rogue secondary agent session
+            }
             targetRoom.agent = session;
             if (isConfig) {
               targetRoom.lastHeader = videoPayload;
@@ -228,6 +232,9 @@ export class SignalingServer {
               const rDev = inMemoryDb.devices.get(rDevId);
               const matches = (rDevId === targetDeviceId) || (serial && rDev && rDev.adb_serial === serial);
               if (matches) {
+                if (r.agent && r.agent !== session) {
+                  return; // Drop duplicate frames from superseded or rogue secondary agent session
+                }
                 r.agent = session;
                 if (isConfig) {
                   r.lastHeader = videoPayload;
@@ -256,6 +263,10 @@ export class SignalingServer {
             const deviceId = msg.deviceId;
             session.deviceId = deviceId;
             const room = this.getRoom(deviceId);
+            if (room.agent && room.agent !== session && room.agent.ws.readyState === WebSocket.OPEN) {
+              console.log(`[SignalingServer] Superseding older agent connection for device ${deviceId}`);
+              try { room.agent.ws.close(4009, 'Superseded by newer agent session'); } catch (e) {}
+            }
             room.agent = session;
             DeviceService.updateStatus(deviceId, 'online');
             session.ws.send(JSON.stringify({ type: 'registered', deviceId, success: true }));
