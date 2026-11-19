@@ -187,13 +187,10 @@ export class SignalingServer {
           let targetDeviceId: string | null = null;
           let videoPayload = buf;
 
-          // Check if payload starts with a 36-char UUID prefix (8-4-4-4-12)
-          if (buf.length > 36) {
-            const prefix = buf.subarray(0, 36).toString('utf8');
-            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(prefix)) {
-              targetDeviceId = prefix;
-              videoPayload = buf.subarray(36);
-            }
+          // Fast zero-regex UUID extraction (hyphens at offsets 8, 13, 18, 23)
+          if (buf.length > 36 && buf[8] === 0x2d && buf[13] === 0x2d && buf[18] === 0x2d && buf[23] === 0x2d) {
+            targetDeviceId = buf.subarray(0, 36).toString('ascii');
+            videoPayload = buf.subarray(36);
           }
 
           // Detect SPS / PPS keyframe config headers

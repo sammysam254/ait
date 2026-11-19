@@ -651,6 +651,17 @@ function startStream(deviceId, targetSerial) {
         }
       });
 
+      const AUD_PREFIX = Buffer.from('AUD:');
+      let cachedTargetDevId = '';
+      let targetDevIdBuf = Buffer.alloc(0);
+      function getTargetDevIdBuf(devId) {
+        if (devId !== cachedTargetDevId) {
+          cachedTargetDevId = devId;
+          targetDevIdBuf = Buffer.from(devId, 'utf8');
+        }
+        return targetDevIdBuf;
+      }
+
       function setupVideoSocket(sock) {
         let buf = Buffer.alloc(0);
         let parsedHeader = false;
@@ -693,7 +704,7 @@ function startStream(deviceId, targetSerial) {
                 if (ws && ws.readyState === 1) {
                   const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
                   if (targetDevId) {
-                    try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), fullKeyframe])); } catch (e) {}
+                    try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), fullKeyframe])); } catch (e) {}
                   }
                 }
                 framesSent++;
@@ -703,7 +714,7 @@ function startStream(deviceId, targetSerial) {
                   if (ws.bufferedAmount <= 2 * 1024 * 1024) {
                     const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
                     if (targetDevId) {
-                      try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), packetData])); } catch (e) {}
+                      try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), packetData])); } catch (e) {}
                     }
                     framesSent++;
                   } else {
@@ -736,6 +747,29 @@ function startStream(deviceId, targetSerial) {
       function setupAudioSocket(sock) {
         let buf = Buffer.alloc(0);
         let parsedAudioHeader = false;
+        let audioBatch = Buffer.alloc(0);
+        let lastAudioFlush = Date.now();
+
+        function isPcmSilent(pcm) {
+          for (let i = 0; i < pcm.length; i += 8) {
+            if (pcm[i] !== 0 || pcm[i + 1] !== 0) return false;
+          }
+          return true;
+        }
+
+        function flushAudio() {
+          if (audioBatch.length === 0) return;
+          if (ws && ws.readyState === 1 && ws.bufferedAmount <= 128 * 1024) {
+            const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+            if (targetDevId) {
+              try {
+                ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), AUD_PREFIX, audioBatch]));
+              } catch (e) {}
+            }
+          }
+          audioBatch = Buffer.alloc(0);
+          lastAudioFlush = Date.now();
+        }
 
         sock.on('data', (chunk) => {
           if (!active) return;
@@ -761,15 +795,14 @@ function startStream(deviceId, targetSerial) {
               const audioData = buf.subarray(12, 12 + size);
               buf = buf.subarray(12 + size);
 
-              // Skip config packets
-              if (isConfig || audioData.length === 0) continue;
+              // Skip config packets or silent packets (zeros) to prevent flooding cloud websocket
+              if (isConfig || audioData.length === 0 || isPcmSilent(audioData)) continue;
 
-              // Audio backpressure: shed audio if buffer > 128KB to always preserve video frame fluidity
-              if (ws && ws.readyState === 1 && ws.bufferedAmount <= 128 * 1024) {
-                const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-                if (targetDevId) {
-                  try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData])); } catch (e) {}
-                }
+              // Batch active audio chunks into 60ms packets (16 msgs/sec instead of 100 msgs/sec)
+              audioBatch = Buffer.concat([audioBatch, audioData]);
+              const now = Date.now();
+              if (audioBatch.length >= 7680 || now - lastAudioFlush >= 60) {
+                flushAudio();
               }
             }
           }
