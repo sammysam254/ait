@@ -36,7 +36,7 @@ export const DeviceViewerPage: React.FC = () => {
   const [latency, setLatency] = useState(24);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [quality, setQuality] = useState<'high' | 'medium' | 'low'>('high');
-  const [isMuted, setIsMuted] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -45,64 +45,142 @@ export const DeviceViewerPage: React.FC = () => {
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const nextAudioTimeRef = useRef<number>(0);
+  const workletRef = useRef<AudioWorkletNode | null>(null);
 
-  // Initialize and resume AudioContext on user gesture
-  const initAudioCtx = () => {
+  // AudioWorklet processor running on dedicated audio thread for smooth, scratch-free, zero-lag playback
+  const PCM_WORKLET_CODE = `
+    class PcmWorkletProcessor extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.queue = [];
+        this.port.onmessage = (e) => {
+          // Keep buffer tight (max 80ms) to ensure zero latency with no scratchy overflow
+          if (this.queue.length > 4) {
+            this.queue.splice(0, this.queue.length - 2);
+          }
+          this.queue.push({
+            left: e.data.left,
+            right: e.data.right,
+            length: e.data.length,
+            offset: 0
+          });
+        };
+      }
+
+      process(inputs, outputs) {
+        const output = outputs[0];
+        if (!output || !output[0]) return true;
+        const outLen = output[0].length;
+        const outL = output[0];
+        const outR = output[1] || output[0];
+        let written = 0;
+
+        while (written < outLen && this.queue.length > 0) {
+          const cur = this.queue[0];
+          const avail = cur.length - cur.offset;
+          const count = Math.min(outLen - written, avail);
+
+          for (let i = 0; i < count; i++) {
+            outL[written + i] = cur.left[cur.offset + i];
+            outR[written + i] = cur.right[cur.offset + i];
+          }
+
+          written += count;
+          cur.offset += count;
+          if (cur.offset >= cur.length) {
+            this.queue.shift();
+          }
+        }
+
+        // Clean silence on underrun (prevents all scratches, clicks and popping)
+        if (written < outLen) {
+          outL.fill(0, written);
+          outR.fill(0, written);
+        }
+
+        return true;
+      }
+    }
+    registerProcessor('pcm-worklet', PcmWorkletProcessor);
+  `;
+
+  // Start AudioContext and AudioWorklet on trusted user interaction
+  const startAudio = async () => {
     try {
       if (!audioCtxRef.current) {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        audioCtxRef.current = new AudioCtx({ sampleRate: 48000 });
+        const ctx = new AudioCtx({ sampleRate: 48000, latencyHint: 'interactive' });
+        audioCtxRef.current = ctx;
+
+        const blob = new Blob([PCM_WORKLET_CODE], { type: 'application/javascript' });
+        const url = URL.createObjectURL(blob);
+        await ctx.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+
+        const worklet = new AudioWorkletNode(ctx, 'pcm-worklet', {
+          outputChannelCount: [2],
+        });
+        workletRef.current = worklet;
+        worklet.connect(ctx.destination);
       }
+
       if (audioCtxRef.current.state === 'suspended') {
-        audioCtxRef.current.resume();
+        await audioCtxRef.current.resume();
       }
-    } catch (e) {}
+      setIsMuted(false);
+    } catch (e) {
+      console.warn('[Audio start error]', e);
+    }
   };
 
-  // Play real-time raw PCM audio streamed from phone via scrcpy (smooth seamless decoding)
+  const stopAudio = () => {
+    setIsMuted(true);
+    if (audioCtxRef.current && audioCtxRef.current.state === 'running') {
+      audioCtxRef.current.suspend().catch(() => {});
+    }
+  };
+
+  const toggleAudio = () => {
+    if (isMuted) {
+      startAudio();
+    } else {
+      stopAudio();
+    }
+  };
+
+  // Play real-time raw PCM audio streamed from phone via scrcpy (studio smooth decoding)
   const playPcmAudio = (rawBytes: Uint8Array) => {
     try {
-      if (!audioCtxRef.current || audioCtxRef.current.state !== 'running') return;
-      const ctx = audioCtxRef.current;
+      if (isMuted || !workletRef.current || !audioCtxRef.current || audioCtxRef.current.state !== 'running') return;
+
       let pcm = rawBytes;
       if (pcm.length > 44 && pcm[0] === 0x52 && pcm[1] === 0x49 && pcm[2] === 0x46 && pcm[3] === 0x46) {
         pcm = pcm.subarray(44);
       }
       const sampleCount = Math.floor(pcm.byteLength / 2);
-      if (sampleCount === 0) return;
-
-      let int16: Int16Array;
-      if (pcm.byteOffset % 2 === 0) {
-        int16 = new Int16Array(pcm.buffer, pcm.byteOffset, sampleCount);
-      } else {
-        const copy = new Uint8Array(pcm);
-        int16 = new Int16Array(copy.buffer, 0, sampleCount);
-      }
-
-      const channels = 2;
-      const frameCount = Math.floor(sampleCount / channels);
+      const frameCount = Math.floor(sampleCount / 2); // 2 channels (stereo)
       if (frameCount === 0) return;
 
-      const audioBuf = ctx.createBuffer(channels, frameCount, 48000);
-      const left = audioBuf.getChannelData(0);
-      const right = audioBuf.getChannelData(1);
+      let samples: Int16Array;
+      if (pcm.byteOffset % 2 === 0) {
+        samples = new Int16Array(pcm.buffer, pcm.byteOffset, sampleCount);
+      } else {
+        const copy = pcm.slice(0, sampleCount * 2);
+        samples = new Int16Array(copy.buffer, copy.byteOffset, sampleCount);
+      }
+
+      const left = new Float32Array(frameCount);
+      const right = new Float32Array(frameCount);
       for (let i = 0; i < frameCount; i++) {
-        left[i] = int16[i * 2] / 32768.0;
-        right[i] = int16[i * 2 + 1] / 32768.0;
+        left[i] = samples[i * 2] / 32768.0;
+        right[i] = samples[i * 2 + 1] / 32768.0;
       }
 
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuf;
-      source.connect(ctx.destination);
-
-      const now = ctx.currentTime;
-      // Seamless jitter buffering: prevents scratches without accumulating latency
-      if (nextAudioTimeRef.current < now || nextAudioTimeRef.current > now + 0.08) {
-        nextAudioTimeRef.current = now + 0.015;
-      }
-      source.start(nextAudioTimeRef.current);
-      nextAudioTimeRef.current += audioBuf.duration;
+      // Zero-copy transfer directly to the AudioWorklet real-time audio thread
+      workletRef.current.port.postMessage(
+        { left, right, length: frameCount },
+        [left.buffer, right.buffer]
+      );
     } catch (e) {}
   };
 
@@ -122,6 +200,14 @@ export const DeviceViewerPage: React.FC = () => {
       if (jmuxerRef.current) {
         try { jmuxerRef.current.destroy(); } catch (e) {}
         jmuxerRef.current = null;
+      }
+      if (workletRef.current) {
+        try { workletRef.current.disconnect(); } catch (e) {}
+        workletRef.current = null;
+      }
+      if (audioCtxRef.current) {
+        try { audioCtxRef.current.close(); } catch (e) {}
+        audioCtxRef.current = null;
       }
     };
   }, [id]);
@@ -157,9 +243,9 @@ export const DeviceViewerPage: React.FC = () => {
         jmuxerRef.current = new JMuxer({
           node: videoRef.current,
           mode: 'video',
-          flushingTime: 25,
+          flushingTime: 0,
           fps: 60,
-          clearBuffer: true,
+          clearBuffer: false,
           debug: false,
         });
       } catch (err) {
@@ -252,11 +338,23 @@ export const DeviceViewerPage: React.FC = () => {
             jmuxerRef.current.feed({
               video: bytes,
             });
-            // Keep video strictly pinned to real-time live edge (ultra low latency < 30ms)
+
+            if (videoRef.current && videoRef.current.paused) {
+              videoRef.current.play().catch(() => {});
+            }
+
+            // Smooth low-latency sync without destroying reference frames (no macroblock tearing or black screens)
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const bufEnd = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
-              if (bufEnd - videoRef.current.currentTime > 0.06) {
-                videoRef.current.currentTime = bufEnd;
+              const drift = bufEnd - videoRef.current.currentTime;
+              if (drift > 0.25) {
+                // Large drift: gently seek close to live edge with safe 40ms cushion
+                videoRef.current.currentTime = Math.max(0, bufEnd - 0.04);
+              } else if (drift > 0.06) {
+                // Minor drift: accelerate slightly to catch up seamlessly without seeking
+                videoRef.current.playbackRate = 1.05;
+              } else {
+                videoRef.current.playbackRate = 1.0;
               }
             }
           } catch (e) {
@@ -330,50 +428,43 @@ export const DeviceViewerPage: React.FC = () => {
   const lastMoveSentRef = useRef(0);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    initAudioCtx();
     if (!canControl) return;
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
     isMouseDownRef.current = true;
     sendInput('touch_down', { x: coords.x, y: coords.y });
-  };
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!canControl || !isMouseDownRef.current) return;
-    const now = Date.now();
-    // High-speed 125Hz sampling (8ms) for instantaneous, zero-latency touch drag
-    if (now - lastMoveSentRef.current < 8) return;
-    lastMoveSentRef.current = now;
+    const onGlobalMouseMove = (ev: MouseEvent) => {
+      if (!isMouseDownRef.current) return;
+      const now = Date.now();
+      // High-speed 125Hz sampling (8ms) for instantaneous, zero-latency touch drag
+      if (now - lastMoveSentRef.current < 8) return;
+      lastMoveSentRef.current = now;
 
-    const coords = getDeviceCoords(e.clientX, e.clientY);
-    if (!coords) return;
+      const c = getDeviceCoords(ev.clientX, ev.clientY);
+      if (c) {
+        sendInput('touch_move', { x: c.x, y: c.y });
+      }
+    };
 
-    sendInput('touch_move', { x: coords.x, y: coords.y });
-  };
+    const onGlobalMouseUp = (ev: MouseEvent) => {
+      if (!isMouseDownRef.current) return;
+      isMouseDownRef.current = false;
+      window.removeEventListener('mousemove', onGlobalMouseMove);
+      window.removeEventListener('mouseup', onGlobalMouseUp);
 
-  const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!canControl || !isMouseDownRef.current) return;
-    isMouseDownRef.current = false;
+      const c = getDeviceCoords(ev.clientX, ev.clientY);
+      if (c) {
+        sendInput('touch_up', { x: c.x, y: c.y });
+      }
+    };
 
-    const coords = getDeviceCoords(e.clientX, e.clientY);
-    if (coords) {
-      sendInput('touch_up', { x: coords.x, y: coords.y });
-    }
-  };
-
-  const handleMouseLeave = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!canControl || !isMouseDownRef.current) return;
-    isMouseDownRef.current = false;
-
-    const coords = getDeviceCoords(e.clientX, e.clientY);
-    if (coords) {
-      sendInput('touch_up', { x: coords.x, y: coords.y });
-    }
+    window.addEventListener('mousemove', onGlobalMouseMove);
+    window.addEventListener('mouseup', onGlobalMouseUp);
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-    initAudioCtx();
     if (!canControl || e.touches.length === 0) return;
     const touch = e.touches[0];
     const coords = getDeviceCoords(touch.clientX, touch.clientY);
@@ -381,29 +472,35 @@ export const DeviceViewerPage: React.FC = () => {
 
     isMouseDownRef.current = true;
     sendInput('touch_down', { x: coords.x, y: coords.y });
-  };
 
-  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
-    if (!canControl || !isMouseDownRef.current || e.touches.length === 0) return;
-    const now = Date.now();
-    if (now - lastMoveSentRef.current < 8) return;
-    lastMoveSentRef.current = now;
+    const onGlobalTouchMove = (ev: TouchEvent) => {
+      if (!isMouseDownRef.current || ev.touches.length === 0) return;
+      const now = Date.now();
+      if (now - lastMoveSentRef.current < 8) return;
+      lastMoveSentRef.current = now;
 
-    const touch = e.touches[0];
-    const coords = getDeviceCoords(touch.clientX, touch.clientY);
-    if (!coords) return;
+      const t = ev.touches[0];
+      const c = getDeviceCoords(t.clientX, t.clientY);
+      if (c) {
+        sendInput('touch_move', { x: c.x, y: c.y });
+      }
+    };
 
-    sendInput('touch_move', { x: coords.x, y: coords.y });
-  };
+    const onGlobalTouchEnd = (ev: TouchEvent) => {
+      if (!isMouseDownRef.current) return;
+      isMouseDownRef.current = false;
+      window.removeEventListener('touchmove', onGlobalTouchMove);
+      window.removeEventListener('touchend', onGlobalTouchEnd);
 
-  const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
-    if (!canControl || !isMouseDownRef.current) return;
-    isMouseDownRef.current = false;
-    const touch = e.changedTouches[0];
-    const coords = touch ? getDeviceCoords(touch.clientX, touch.clientY) : null;
-    if (coords) {
-      sendInput('touch_up', { x: coords.x, y: coords.y });
-    }
+      const t = ev.changedTouches[0];
+      const c = t ? getDeviceCoords(t.clientX, t.clientY) : null;
+      if (c) {
+        sendInput('touch_up', { x: c.x, y: c.y });
+      }
+    };
+
+    window.addEventListener('touchmove', onGlobalTouchMove);
+    window.addEventListener('touchend', onGlobalTouchEnd);
   };
 
   const toggleFullscreen = () => {
@@ -471,16 +568,13 @@ export const DeviceViewerPage: React.FC = () => {
           </div>
 
           <button
-            onClick={() => {
-              initAudioCtx();
-              setIsMuted(!isMuted);
-            }}
+            onClick={toggleAudio}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
               !isMuted
                 ? 'bg-blue-600/30 text-blue-400 border border-blue-500/40 shadow-lg shadow-blue-500/20'
                 : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700'
             }`}
-            title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+            title={isMuted ? 'Click to Enable Audio' : 'Click to Mute Audio'}
           >
             {!isMuted ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
             <span>{!isMuted ? 'Audio: LIVE' : 'Audio: MUTED'}</span>
@@ -533,12 +627,7 @@ export const DeviceViewerPage: React.FC = () => {
           <div
             ref={overlayRef}
             onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={handleMouseLeave}
             onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
             className={`absolute inset-0 z-10 select-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
           />
 
