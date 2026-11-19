@@ -461,20 +461,31 @@ export const DeviceViewerPage: React.FC = () => {
 
   const lastMoveSentRef = useRef(0);
 
-  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    if (!canControl) return;
-    const coords = getDeviceCoords(e.clientX, e.clientY);
-    if (!coords) return;
+  // Active (non-passive) wheel listener to cleanly prevent browser scroll and send instant swipes
+  useEffect(() => {
+    const el = overlayRef.current;
+    if (!el) return;
 
-    // e.deltaY > 0 is scroll down (next video in TikTok!), negative is scroll up
-    sendInput('scroll', {
-      x: coords.x,
-      y: coords.y,
-      hScroll: Math.round(e.deltaX),
-      vScroll: Math.round(-e.deltaY),
-    });
-  };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (!canControl) return;
+      const coords = getDeviceCoords(e.clientX, e.clientY);
+      if (!coords) return;
+
+      // e.deltaY > 0 is scroll down (next video in TikTok!), negative is scroll up
+      sendInput('scroll', {
+        x: coords.x,
+        y: coords.y,
+        hScroll: Math.round(e.deltaX),
+        vScroll: Math.round(-e.deltaY),
+      });
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+    };
+  }, [canControl, device]);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -731,7 +742,6 @@ export const DeviceViewerPage: React.FC = () => {
             ref={overlayRef}
             onMouseDown={handleMouseDown}
             onTouchStart={handleTouchStart}
-            onWheel={handleWheel}
             style={{ touchAction: 'none' }}
             className={`absolute inset-0 z-10 select-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
           />
