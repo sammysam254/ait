@@ -778,7 +778,7 @@ function startStream(deviceId, targetSerial) {
         sock.on('error', () => {});
       }
 
-      // 5. Spawn scrcpy-server with rock-solid 30 FPS profile (2 Mbps, 1080px bounds, stay_awake=true)
+      // 5. Spawn scrcpy-server with ultra-low latency profile (MediaCodec low-latency:int=1)
       scrcpyProc = spawn(adbPath, [
         '-s', serial,
         'shell',
@@ -789,12 +789,12 @@ function startStream(deviceId, targetSerial) {
         'log_level=info',
         'cleanup=false',
         'max_size=1080',
-        'max_fps=30',
-        'video_bit_rate=2000000',
+        'video_bit_rate=2500000',
         'stay_awake=true',
         'control=true',
         'audio=true',
         'audio_codec=raw',
+        'video_codec_options=low-latency:int=1',
       ]);
 
       scrcpyProc.stdout.on('data', (d) => {

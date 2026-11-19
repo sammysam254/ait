@@ -50,6 +50,7 @@ export const DeviceViewerPage: React.FC = () => {
   const isMountedRef = useRef<boolean>(true);
   const activeDeviceIdRef = useRef<string>(id || '');
   const lastWheelTimeRef = useRef<number>(0);
+  const initialLiveJumpRef = useRef<boolean>(false);
 
   // High-performance real-time AudioWorklet ring buffer running on the dedicated audio thread
   const PCM_WORKLET_CODE = `
@@ -413,15 +414,20 @@ export const DeviceViewerPage: React.FC = () => {
             }
 
             // Real-time zero-latency sync with physical device:
-            // Smoothly adapt playbackRate so frames display without seeking-induced pauses
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
-              if (drift > 2.5 && !videoRef.current.seeking) {
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.02);
-              } else if (drift > 0.18) {
-                videoRef.current.playbackRate = 1.25;
-              } else if (drift < 0.06) {
+
+              if (!initialLiveJumpRef.current && liveEdge > 0.05) {
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
+                initialLiveJumpRef.current = true;
+              } else if (drift > 0.45 && !videoRef.current.seeking) {
+                // Hard seek only if lag exceeds 450ms
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
+              } else if (drift > 0.12) {
+                // Fast catchup rate
+                videoRef.current.playbackRate = 1.4;
+              } else if (drift < 0.05) {
                 videoRef.current.playbackRate = 1.0;
               }
             }
@@ -517,6 +523,13 @@ export const DeviceViewerPage: React.FC = () => {
         ...data,
       },
     }));
+
+    if (videoRef.current && videoRef.current.buffered.length > 0) {
+      const live = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
+      if (live - videoRef.current.currentTime > 0.18 && !videoRef.current.seeking) {
+        videoRef.current.currentTime = Math.max(0, live - 0.01);
+      }
+    }
   };
 
   const lastMoveSentRef = useRef(0);
