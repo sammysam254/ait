@@ -148,6 +148,22 @@ export class SignalingServer {
     });
 
     console.log('[SignalingServer] WebSocket Signaling and Streaming gateway initialized on /ws');
+
+    // Server-side heartbeat to keep Cloudflare, ALB, and Nginx reverse proxy tunnels permanently active
+    setInterval(() => {
+      for (const agent of this.connectedAgents) {
+        if (agent.ws.readyState === WebSocket.OPEN) {
+          try { agent.ws.ping(); } catch (e) {}
+        }
+      }
+      for (const room of this.deviceRooms.values()) {
+        for (const viewer of room.viewers) {
+          if (viewer.ws.readyState === WebSocket.OPEN) {
+            try { viewer.ws.ping(); } catch (e) {}
+          }
+        }
+      }
+    }, 20000);
   }
 
   private getRoom(deviceId: string) {
@@ -293,13 +309,22 @@ export class SignalingServer {
       this.connectedAgents.delete(session);
       console.log(`[SignalingServer] Agent disconnected: ${session.agentId}`);
       if (session.deviceId) {
-        const room = this.getRoom(session.deviceId);
+        const devId = session.deviceId;
+        const room = this.getRoom(devId);
         if (room.agent === session) {
           room.agent = undefined;
-          DeviceService.updateStatus(session.deviceId, 'offline');
-          for (const viewer of room.viewers) {
-            viewer.ws.send(JSON.stringify({ type: 'device-offline', deviceId: session.deviceId }));
-          }
+          // Grace period: allow 5s for agent reconnection before declaring device offline
+          setTimeout(() => {
+            const currentRoom = this.deviceRooms.get(devId);
+            if (currentRoom && (!currentRoom.agent || currentRoom.agent.ws.readyState !== WebSocket.OPEN)) {
+              DeviceService.updateStatus(devId, 'offline');
+              for (const viewer of currentRoom.viewers) {
+                if (viewer.ws.readyState === WebSocket.OPEN) {
+                  viewer.ws.send(JSON.stringify({ type: 'device-offline', deviceId: devId }));
+                }
+              }
+            }
+          }, 5000);
         }
       }
     });
@@ -352,6 +377,13 @@ export class SignalingServer {
         const agentSession = (room.agent && room.agent.ws.readyState === WebSocket.OPEN) ? room.agent : Array.from(this.connectedAgents).find(a => a.ws.readyState === WebSocket.OPEN);
 
         switch (msg.type) {
+          case 'ping': {
+            if (session.ws.readyState === WebSocket.OPEN) {
+              session.ws.send(JSON.stringify({ type: 'pong' }));
+            }
+            break;
+          }
+
           case 'request-stream': {
             if (agentSession) {
               room.agent = agentSession;

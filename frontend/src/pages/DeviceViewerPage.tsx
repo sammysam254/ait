@@ -46,6 +46,8 @@ export const DeviceViewerPage: React.FC = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
+  const reconnectTimerRef = useRef<any>(null);
+  const isMountedRef = useRef<boolean>(true);
 
   // AudioWorklet processor running on dedicated audio thread for smooth, scratch-free, zero-lag playback
   const PCM_WORKLET_CODE = `
@@ -188,13 +190,24 @@ export const DeviceViewerPage: React.FC = () => {
   const touchStartPosRef = useRef<{ x: number; y: number; time: number } | null>(null);
 
   useEffect(() => {
+    isMountedRef.current = true;
     if (id) {
       loadDevice();
     }
 
     return () => {
+      isMountedRef.current = false;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       if (wsRef.current) {
-        wsRef.current.close();
+        try {
+          wsRef.current.onclose = null;
+          wsRef.current.onerror = null;
+          wsRef.current.close();
+        } catch (e) {}
+        wsRef.current = null;
       }
       if (jmuxerRef.current) {
         try { jmuxerRef.current.destroy(); } catch (e) {}
@@ -226,12 +239,26 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   const connectStream = (serverWsUrl?: string, serverToken?: string) => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
+    if (wsRef.current) {
+      try {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.close();
+      } catch (e) {}
+      wsRef.current = null;
+    }
+
     const token = serverToken || localStorage.getItem('vtx_token');
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
     const wsUrl = serverWsUrl || `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(token || '')}&deviceId=${id}`;
 
-    setStatus('connecting');
+    setStatus((prev) => (prev === 'connected' ? 'connected' : 'connecting'));
 
     // Initialize JMuxer on HTML5 video element for hardware 60 FPS decoding
     if (videoRef.current) {
@@ -256,17 +283,27 @@ export const DeviceViewerPage: React.FC = () => {
     wsRef.current = ws;
     ws.binaryType = 'arraybuffer';
 
+    let pingTimer: any = null;
+    let streamPoller: any = null;
+
     ws.onopen = () => {
       setStatus('connected');
       startAudio();
       // Actively request streaming frame feed from the agent
       ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
+
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'ping' })); } catch (e) {}
+        }
+      }, 15000);
     };
 
     let frameCount = 0;
     let lastTime = performance.now();
 
-    const streamPoller = setInterval(() => {
+    streamPoller = setInterval(() => {
       if (frameCount === 0 && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
       }
@@ -280,7 +317,15 @@ export const DeviceViewerPage: React.FC = () => {
             if (msg.canControl !== undefined) setCanControl(msg.canControl);
             ws.send(JSON.stringify({ type: 'request-stream', deviceId: id }));
           } else if (msg.type === 'device-offline') {
+            console.warn('[Viewer] Device stream offline signaled. Retrying in background...');
             setStatus('offline');
+            if (isMountedRef.current && !reconnectTimerRef.current) {
+              reconnectTimerRef.current = setTimeout(() => {
+                if (isMountedRef.current) {
+                  connectStream(serverWsUrl, serverToken);
+                }
+              }, 3000);
+            }
           }
         } catch (e) {}
       } else if (event.data instanceof ArrayBuffer) {
@@ -361,14 +406,20 @@ export const DeviceViewerPage: React.FC = () => {
 
     ws.onerror = () => {
       clearInterval(streamPoller);
-      setStatus('error');
-      setErrorMessage('Connection failed to cloud streaming gateway.');
+      if (pingTimer) clearInterval(pingTimer);
+      console.warn('[Viewer] WebSocket error encountered.');
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       clearInterval(streamPoller);
-      if (status !== 'error') {
-        setStatus('offline');
+      if (pingTimer) clearInterval(pingTimer);
+      console.warn(`[Viewer] WebSocket disconnected (code: ${event.code}). Auto-reconnecting in 1.5s...`);
+      if (isMountedRef.current && !reconnectTimerRef.current) {
+        reconnectTimerRef.current = setTimeout(() => {
+          if (isMountedRef.current) {
+            connectStream(serverWsUrl, serverToken);
+          }
+        }, 1500);
       }
     };
   };

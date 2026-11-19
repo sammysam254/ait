@@ -336,21 +336,31 @@ function connectWebSocket() {
 
   console.log(`[StreamBridge] Connecting to Cloud Signaling: ${wsProto}//${host}/ws...`);
 
+  let pingInterval = null;
+
   try {
     ws = new WsClient(wsUrl);
 
     ws.onopen = () => {
       console.log('[StreamBridge] 🟢 Connected to Cloud Signaling Gateway successfully.');
       isReconnecting = false;
-      // Re-register all known devices
-      for (const [devId, ser] of registeredDevices.entries()) {
-        console.log(`[StreamBridge] Registering device producer: ${devId} (${ser})`);
-        ws.send(JSON.stringify({ type: 'agent-register-device', deviceId: devId, serial: ser }));
 
-        const cached = cachedKeyframes.get(ser);
-        if (cached && ws.readyState === 1) {
-          ws.send(Buffer.concat([Buffer.from(devId, 'utf8'), cached]));
+      // Active heartbeat ping every 15s to keep Cloudflare / Nginx tunnels permanently alive
+      if (pingInterval) clearInterval(pingInterval);
+      pingInterval = setInterval(() => {
+        if (ws && ws.readyState === 1) {
+          try { ws.ping(); } catch (e) {}
         }
+      }, 15000);
+
+      // Re-register each physical phone exactly once with its active cloud device ID
+      const registeredSerials = new Set();
+      for (const [devId, ser] of registeredDevices.entries()) {
+        if (registeredSerials.has(ser)) continue;
+        registeredSerials.add(ser);
+        const activeDevId = serialToActiveDeviceId.get(ser) || devId;
+        console.log(`[StreamBridge] Registering active device producer: ${activeDevId} (${ser})`);
+        ws.send(JSON.stringify({ type: 'agent-register-device', deviceId: activeDevId, serial: ser }));
       }
     };
 
@@ -365,12 +375,14 @@ function connectWebSocket() {
     };
 
     ws.onclose = (e) => {
+      if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
       console.warn(`[StreamBridge] 🟡 WebSocket disconnected (code: ${e.code || 'closed'}). Reconnecting in 3s...`);
       stopAllStreams();
       scheduleReconnect();
     };
 
     ws.onerror = (e) => {
+      if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
       console.warn('[StreamBridge] 🔴 WebSocket error:', e.message || 'connection failed');
     };
   } catch (err) {
@@ -582,12 +594,20 @@ function startStream(deviceId, targetSerial) {
               } else {
                 // Complete delta frame
                 if (ws && ws.readyState === 1) {
-                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-                  if (targetDevId) {
-                    ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), packetData]));
+                  // Congestion backpressure: if socket has > 512KB buffered, drop delta and request keyframe
+                  if (ws.bufferedAmount > 512 * 1024) {
+                    const cSock = controlSockets.get(serial);
+                    if (cSock && !cSock.destroyed) {
+                      try { cSock.write(Buffer.from([17])); } catch (e) {}
+                    }
+                  } else {
+                    const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                    if (targetDevId) {
+                      ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), packetData]));
+                    }
+                    framesSent++;
                   }
                 }
-                framesSent++;
               }
 
               const now = Date.now();
@@ -632,9 +652,12 @@ function startStream(deviceId, targetSerial) {
               buf = buf.subarray(12 + size);
 
               if (ws && ws.readyState === 1 && audioData.length > 0) {
-                const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-                if (targetDevId) {
-                  ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
+                // Audio backpressure protection
+                if (ws.bufferedAmount < 512 * 1024) {
+                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                  if (targetDevId) {
+                    ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), Buffer.from('AUD:'), audioData]));
+                  }
                 }
               }
             }
@@ -644,7 +667,7 @@ function startStream(deviceId, targetSerial) {
         sock.on('error', () => {});
       }
 
-      // 5. Spawn scrcpy-server with 1-second keyframe interval
+      // 5. Spawn scrcpy-server with smooth 60 FPS profile (4 Mbps, 1200px bounds)
       scrcpyProc = spawn(adbPath, [
         '-s', serial,
         'shell',
@@ -654,8 +677,8 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'max_size=1600',
-        'video_bit_rate=8000000',
+        'max_size=1200',
+        'video_bit_rate=4000000',
         'audio=true',
         'audio_codec=raw',
         'video_codec_options=i-frame-interval:int=1',
@@ -793,22 +816,37 @@ async function discoverAndSync() {
           for (const d of data.devices) {
             const devId = d.id;
             const ser = d.adb_serial || d.adbSerial;
-            if (!registeredDevices.has(devId)) {
+            const isNew = !registeredDevices.has(devId);
+            if (isNew) {
               console.log(`[Device] ☁️ Synced with Cloud Fleet: ${d.device_name} (ID: ${devId})`);
-            }
-            registeredDevices.set(devId, ser);
-            deviceIdToSerial.set(devId, ser);
-            if (!serialToDeviceIds.has(ser)) {
-              serialToDeviceIds.set(ser, new Set());
-            }
-            serialToDeviceIds.get(ser).add(devId);
+              // Clear stale ID mappings for this serial
+              for (const [oldId, oldSer] of registeredDevices.entries()) {
+                if (oldSer === ser && oldId !== devId) {
+                  registeredDevices.delete(oldId);
+                  deviceIdToSerial.delete(oldId);
+                }
+              }
+              registeredDevices.set(devId, ser);
+              deviceIdToSerial.set(devId, ser);
+              serialToActiveDeviceId.set(ser, devId);
+              if (!serialToDeviceIds.has(ser)) {
+                serialToDeviceIds.set(ser, new Set());
+              }
+              serialToDeviceIds.get(ser).add(devId);
 
-            if (ws && ws.readyState === 1) {
-              ws.send(JSON.stringify({
-                type: 'agent-register-device',
-                deviceId: devId,
-                serial: ser,
-              }));
+              if (ws && ws.readyState === 1) {
+                ws.send(JSON.stringify({
+                  type: 'agent-register-device',
+                  deviceId: devId,
+                  serial: ser,
+                }));
+              }
+            } else {
+              registeredDevices.set(devId, ser);
+              deviceIdToSerial.set(devId, ser);
+              if (!serialToActiveDeviceId.has(ser)) {
+                serialToActiveDeviceId.set(ser, devId);
+              }
             }
 
             // Initiate or map screen stream for this device serial only if not yet active
