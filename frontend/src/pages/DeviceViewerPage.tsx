@@ -470,26 +470,22 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Real-time sub-50ms live-edge synchronization
+            // Real-time sub-50ms live-edge lock
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
 
-              if (!initialLiveJumpRef.current && liveEdge > 0.08) {
-                // Initial jump straight to the live edge on first frame arrival
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.03);
+              if (!initialLiveJumpRef.current && liveEdge > 0.05) {
+                // Instant initial lock to live edge on first frame
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
                 initialLiveJumpRef.current = true;
-              } else if (drift > 0.40 && !videoRef.current.seeking) {
-                // If stream accumulated >400ms lag, jump immediately to live edge
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.03);
-              } else if (drift > 0.10) {
-                // Drift between 100ms and 400ms: speed up 30% to catch up smoothly in ~250ms
-                videoRef.current.playbackRate = 1.30;
-              } else if (drift > 0.04) {
-                // Slight drift (>40ms): gentle 15% speed-up
-                videoRef.current.playbackRate = 1.15;
+              } else if (drift > 0.15 && !videoRef.current.seeking) {
+                // Immediate snap to live edge if buffer accumulates >150ms
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
+              } else if (drift > 0.06) {
+                // Gentle acceleration for micro-drifts
+                videoRef.current.playbackRate = 1.25;
               } else {
-                // Under 40ms: lock to 1.0x real-time 1:1 sync
                 videoRef.current.playbackRate = 1.0;
               }
             }

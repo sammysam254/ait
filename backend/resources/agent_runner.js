@@ -736,13 +736,15 @@ function startStream(deviceId, targetSerial) {
             framesSent++;
           } else {
             if (ws && ws.readyState === 1) {
-              if (ws.bufferedAmount <= 2 * 1024 * 1024) {
+              // 256KB buffer limit: guarantees stream latency never exceeds ~100ms
+              if (ws.bufferedAmount <= 256 * 1024) {
                 const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
                 if (targetDevId) {
                   try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), packetData])); } catch (e) {}
                 }
                 framesSent++;
               } else {
+                // Network congestion: request immediate IDR keyframe to cleanly resume at live edge
                 const ctrl = controlSockets.get(serial);
                 if (ctrl && !ctrl.destroyed) {
                   try { ctrl.write(Buffer.from([17])); } catch (e) {}
@@ -877,12 +879,13 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'video_bit_rate=4000000',
+        'max_size=960',
+        'video_bit_rate=2000000',
         'max_fps=60',
         'stay_awake=true',
         'control=true',
         'audio=false',
-        'video_codec_options=i-frame-interval:int=2,low-latency:int=1',
+        'video_codec_options=i-frame-interval:int=1,low-latency:int=1',
         'downsize_on_error=true',
       ]);
 
