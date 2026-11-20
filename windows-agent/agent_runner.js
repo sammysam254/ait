@@ -237,14 +237,14 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     const msg = Buffer.alloc(32);
     msg.writeUInt8(2, 0); // type: INJECT_TOUCH_EVENT
     msg.writeUInt8(action, 1); // 0=DOWN, 1=UP, 2=MOVE
-    msg.writeBigUInt64BE(0n, 2); // pointerId = 0 (standard single-touch pointer ID for Android)
+    msg.writeBigUInt64BE(0xfffffffffffffffen, 2); // POINTER_ID_GENERIC_FINGER (-2n) for instant native gesture tracking
     msg.writeUInt32BE(Math.max(0, Math.min(width, Math.round(x))), 10);
     msg.writeUInt32BE(Math.max(0, Math.min(height, Math.round(y))), 14);
     msg.writeUInt16BE(width, 18);
     msg.writeUInt16BE(height, 20);
     msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
-    msg.writeUInt32BE(0, 24); // action_button: 0 for touch events
-    msg.writeUInt32BE(0, 28); // buttons: 0 for touch events (Android touchscreen expects 0)
+    msg.writeUInt32BE(action === 0 ? 1 : 0, 24); // action_button: AMOTION_EVENT_BUTTON_PRIMARY on down
+    msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons: AMOTION_EVENT_BUTTON_PRIMARY active while touching
     sock.write(msg);
     return true;
   } catch (e) {
@@ -971,8 +971,7 @@ function startStream(deviceId, targetSerial) {
           'video=false',
           'audio=true',
           'audio_codec=raw',
-          'audio_source=playback',
-          'audio_dup=true',
+          'audio_source=output', // Captures full system audio and mutes physical device speakers
           'control=false',
         ]);
 

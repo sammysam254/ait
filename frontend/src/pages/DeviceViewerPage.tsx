@@ -653,7 +653,7 @@ export const DeviceViewerPage: React.FC = () => {
 
     // Send touch_down IMMEDIATELY on finger/mouse contact — phone responds with 0ms delay!
     sendInput('touch_down', { x: coords.x, y: coords.y });
-    lastMoveSentRef.current = performance.now();
+    lastMoveSentRef.current = 0; // 0 allows the very first movement delta to transmit immediately without throttle delay
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -663,9 +663,9 @@ export const DeviceViewerPage: React.FC = () => {
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    // 60Hz (16ms) smooth gesture tracking: lockstep drag and swipe without flooding WS
+    // Instant initial gesture response + smooth 80Hz (12ms) tracking for fluid swiping
     const now = performance.now();
-    if (now - lastMoveSentRef.current >= 16) {
+    if (lastMoveSentRef.current === 0 || now - lastMoveSentRef.current >= 12) {
       lastMoveSentRef.current = now;
       sendInput('touch_move', { x: coords.x, y: coords.y });
     }
