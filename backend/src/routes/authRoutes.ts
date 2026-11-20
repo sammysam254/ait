@@ -49,26 +49,44 @@ router.post('/login', (req: Request, res: Response) => {
   }
 
   if (!profile) {
-    return res.status(401).json({ error: 'No account found with this email. Please register first.' });
+    return res.status(401).json({ error: 'No account found with this email. Please register or accept your team invitation.' });
   }
 
-  // Find their primary organization
+  // Find their organization
   let organizationId = '';
-  for (const org of inMemoryDb.organizations.values()) {
-    if (org.owner_id === profile.id) {
-      organizationId = org.id;
-      break;
+
+  // 1. Check if assigned subordinate worker
+  if (profile.system_role === 'assigned_user') {
+    const assignedUser = Array.from(inMemoryDb.assignedUsers.values()).find(
+      au => (au.user_id === profile!.id || au.email.toLowerCase() === cleanEmail) && au.status === 'active'
+    );
+    if (assignedUser) {
+      organizationId = assignedUser.organization_id;
     }
   }
 
+  // 2. Check if primary customer / organization owner
   if (!organizationId) {
-    for (const au of inMemoryDb.assignedUsers.values()) {
-      if (au.user_id === profile.id) {
-        organizationId = au.organization_id;
+    for (const org of inMemoryDb.organizations.values()) {
+      if (org.owner_id === profile.id) {
+        organizationId = org.id;
         break;
       }
     }
   }
+
+  // 3. Fallback check in assignedUsers
+  if (!organizationId) {
+    for (const au of inMemoryDb.assignedUsers.values()) {
+      if (au.user_id === profile.id || au.email.toLowerCase() === cleanEmail) {
+        organizationId = au.organization_id;
+        profile.system_role = 'assigned_user';
+        break;
+      }
+    }
+  }
+
+  const organization = inMemoryDb.organizations.get(organizationId);
 
   const token = jwt.sign(
     {
@@ -89,25 +107,133 @@ router.post('/login', (req: Request, res: Response) => {
       fullName: profile.full_name,
       role: profile.system_role,
       organizationId,
+      organizationName: organization?.name || 'Cloud Device Farm',
+      plan: organization?.plan || 'starter',
     },
   });
 });
 
 // POST /api/auth/register
 router.post('/register', (req: Request, res: Response) => {
-  const { email, password, fullName, companyName } = req.body;
+  const { email, password, fullName, companyName, inviteToken } = req.body;
 
   if (!email) {
     return res.status(400).json({ error: 'Email is required.' });
   }
 
   const cleanEmail = email.toLowerCase().trim();
+
+  // =========================================================================
+  // SUBORDINATE WORKER INVITATION FLOW
+  // =========================================================================
+  if (inviteToken) {
+    const invite = Array.from(inMemoryDb.invitations.values()).find(
+      inv => inv.token === inviteToken
+    );
+
+    if (!invite) {
+      return res.status(400).json({ error: 'Invalid or expired invitation link. Please request a new invite from your team owner.' });
+    }
+
+    if (invite.status === 'expired' || new Date(invite.expires_at).getTime() < Date.now()) {
+      return res.status(400).json({ error: 'This invitation has expired. Please ask the account owner to invite you again.' });
+    }
+
+    if (invite.email.toLowerCase() !== cleanEmail) {
+      return res.status(400).json({
+        error: `This invitation was issued for ${invite.email}. Please register with that exact email address.`
+      });
+    }
+
+    // Mark invitation accepted
+    invite.status = 'accepted';
+
+    // Find or create profile
+    let profile = Array.from(inMemoryDb.profiles.values()).find(p => p.email.toLowerCase() === cleanEmail);
+    const userId = profile ? profile.id : uuidv4();
+
+    if (!profile) {
+      profile = {
+        id: userId,
+        email: cleanEmail,
+        full_name: fullName || invite.full_name || cleanEmail.split('@')[0],
+        system_role: 'assigned_user',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      inMemoryDb.profiles.set(userId, profile);
+    } else {
+      profile.system_role = 'assigned_user';
+      if (fullName) profile.full_name = fullName;
+      profile.updated_at = new Date().toISOString();
+    }
+
+    // Link or activate in assignedUsers under inviter's organization
+    let assignedUser = Array.from(inMemoryDb.assignedUsers.values()).find(
+      au => au.organization_id === invite.organization_id && (au.email.toLowerCase() === cleanEmail || au.user_id === userId)
+    );
+
+    if (assignedUser) {
+      assignedUser.user_id = userId;
+      assignedUser.status = 'active';
+    } else {
+      assignedUser = {
+        id: uuidv4(),
+        organization_id: invite.organization_id,
+        user_id: userId,
+        email: cleanEmail,
+        invited_by: invite.invited_by,
+        status: 'active',
+        created_at: new Date().toISOString(),
+      };
+      inMemoryDb.assignedUsers.set(assignedUser.id, assignedUser);
+    }
+
+    // Relink any device assignments that were keyed by email to the new userId
+    for (const da of inMemoryDb.deviceAssignments.values()) {
+      if (da.organization_id === invite.organization_id &&
+         (da.assigned_user_id === cleanEmail || da.assigned_user_id === assignedUser.user_id)) {
+        da.assigned_user_id = userId;
+      }
+    }
+
+    const org = inMemoryDb.organizations.get(invite.organization_id);
+
+    const token = jwt.sign(
+      {
+        id: profile.id,
+        email: profile.email,
+        system_role: 'assigned_user',
+        organizationId: invite.organization_id,
+      },
+      config.jwtSecret,
+      { expiresIn: '7d' }
+    );
+
+    return res.status(201).json({
+      token,
+      user: {
+        id: profile.id,
+        email: profile.email,
+        fullName: profile.full_name,
+        role: 'assigned_user',
+        organizationId: invite.organization_id,
+        organizationName: org?.name || 'Cloud Device Farm',
+        plan: org?.plan || 'starter',
+      },
+      message: 'Worker account created successfully. Routed to assigned team.',
+    });
+  }
+
+  // =========================================================================
+  // STANDARD CUSTOMER REGISTRATION FLOW
+  // =========================================================================
   const existing = Array.from(inMemoryDb.profiles.values()).find(
     p => p.email.toLowerCase() === cleanEmail
   );
 
   if (existing) {
-    return res.status(409).json({ error: 'An account with this email already exists.' });
+    return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });
   }
 
   const isSuperAdmin = cleanEmail === 'sammyseth260@gmail.com';
@@ -163,6 +289,8 @@ router.post('/register', (req: Request, res: Response) => {
       fullName: profile.full_name,
       role: profile.system_role,
       organizationId: orgId,
+      organizationName: orgName,
+      plan: plan,
     },
   });
 });

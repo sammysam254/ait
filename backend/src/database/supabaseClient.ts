@@ -134,6 +134,18 @@ export interface DeviceAssignment {
   updated_at: string;
 }
 
+export interface Invitation {
+  id: string;
+  token: string;
+  organization_id: string;
+  invited_by: string;
+  email: string;
+  full_name?: string;
+  status: 'pending' | 'accepted' | 'expired';
+  created_at: string;
+  expires_at: string;
+}
+
 export interface AuditLog {
   id: string;
   organization_id?: string;
@@ -156,6 +168,7 @@ class InMemoryDatabase {
   deviceShares: Map<string, DeviceShare> = new Map();
   assignedUsers: Map<string, AssignedUser> = new Map();
   deviceAssignments: Map<string, DeviceAssignment> = new Map();
+  invitations: Map<string, Invitation> = new Map();
   auditLogs: AuditLog[] = [];
 
   constructor() {

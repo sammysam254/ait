@@ -43,20 +43,45 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
     const userEmail = (decoded.email || '').toLowerCase().trim();
     const isSuperAdmin = userEmail === 'sammyseth260@gmail.com';
 
+    // Check if this user is a subordinate worker in an organization
+    const assignedUser = Array.from(inMemoryDb.assignedUsers.values()).find(
+      au => au.user_id === userId || au.email.toLowerCase() === userEmail
+    );
+
     let profile = inMemoryDb.profiles.get(userId);
     if (!profile) {
+      // Check if user was registered under assignedUsers with a different ID
       profile = {
         id: userId,
         email: userEmail,
         full_name: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (decoded.user_metadata?.full_name || userEmail.split('@')[0]),
-        system_role: isSuperAdmin ? 'admin' : (decoded.user_metadata?.system_role || 'customer'),
+        system_role: isSuperAdmin ? 'admin' : (assignedUser ? 'assigned_user' : (decoded.user_metadata?.system_role || 'customer')),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
       inMemoryDb.profiles.set(userId, profile);
     }
 
+    if (assignedUser && !isSuperAdmin) {
+      profile.system_role = 'assigned_user';
+      if (assignedUser.user_id !== userId) {
+        assignedUser.user_id = userId;
+      }
+      assignedUser.status = 'active';
+      // Relink device assignments to this userId
+      for (const da of inMemoryDb.deviceAssignments.values()) {
+        if (da.organization_id === assignedUser.organization_id &&
+            (da.assigned_user_id === userEmail || da.assigned_user_id === assignedUser.user_id)) {
+          da.assigned_user_id = userId;
+        }
+      }
+    }
+
     let organizationId = decoded.organizationId;
+    if (assignedUser && !isSuperAdmin) {
+      organizationId = assignedUser.organization_id;
+    }
+
     if (!organizationId) {
       for (const org of inMemoryDb.organizations.values()) {
         if (org.owner_id === profile.id) {

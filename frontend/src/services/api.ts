@@ -83,7 +83,7 @@ export class ApiService {
     throw new Error('Login failed. Please check your credentials.');
   }
 
-  static async register(email: string, password: string, fullName: string, companyName?: string): Promise<{ token: string; user: any }> {
+  static async register(email: string, password: string, fullName: string, companyName?: string, inviteToken?: string): Promise<{ token: string; user: any }> {
     const cleanEmail = email.toLowerCase().trim();
     if (!cleanEmail || !password) {
       throw new Error('Please enter both email and password.');
@@ -93,15 +93,52 @@ export class ApiService {
     }
 
     const isSuperAdmin = cleanEmail === 'sammyseth260@gmail.com';
+    const role = isSuperAdmin ? 'admin' : (inviteToken ? 'assigned_user' : 'customer');
 
-    // Register with Supabase Auth
+    // 1. If registering as an invited worker, notify backend directly with inviteToken
+    if (inviteToken) {
+      try {
+        const backendRes = await this.request<{ token: string; user: any }>('/auth/register', {
+          method: 'POST',
+          body: JSON.stringify({
+            email: cleanEmail,
+            password,
+            fullName,
+            inviteToken,
+          }),
+        });
+
+        // Also register with Supabase Auth in background for credential syncing
+        supabase.auth.signUp({
+          email: cleanEmail,
+          password,
+          options: {
+            data: {
+              full_name: fullName,
+              system_role: 'assigned_user',
+              inviteToken,
+            },
+          },
+        }).catch(() => {});
+
+        localStorage.setItem('vtx_token', backendRes.token);
+        localStorage.setItem('vtx_user', JSON.stringify(backendRes.user));
+        return backendRes;
+      } catch (beErr: any) {
+        // Fallback to Supabase if backend had non-blocking error
+        console.warn('Backend invite register returned:', beErr);
+      }
+    }
+
+    // 2. Standard registration with Supabase Auth
     const { data: supaData, error: supaErr } = await supabase.auth.signUp({
       email: cleanEmail,
       password,
       options: {
         data: {
           full_name: fullName,
-          system_role: isSuperAdmin ? 'admin' : 'customer',
+          system_role: role,
+          inviteToken: inviteToken || undefined,
         },
       },
     });
@@ -115,18 +152,38 @@ export class ApiService {
     }
 
     if (supaData?.user) {
+      // Sync with backend API
+      try {
+        const backendRes = await this.request<{ token: string; user: any }>('/auth/register', {
+          method: 'POST',
+          body: JSON.stringify({
+            email: cleanEmail,
+            password,
+            fullName,
+            companyName,
+            inviteToken,
+          }),
+        });
+        localStorage.setItem('vtx_token', backendRes.token);
+        localStorage.setItem('vtx_user', JSON.stringify(backendRes.user));
+        return backendRes;
+      } catch (err) {
+        console.warn('Backend sync warning:', err);
+      }
+
       // If auto-logged in with session
       if (supaData.session) {
         const userObj = {
           id: supaData.session.user.id,
           email: cleanEmail,
           fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
-          role: isSuperAdmin ? 'admin' : 'customer',
+          role: role,
           organizationId: supaData.session.user.id,
           organizationName: companyName || `${cleanEmail.split('@')[0]}'s Cloud Devices`,
           plan: isSuperAdmin ? 'enterprise' : 'starter',
         };
         const token = supaData.session.access_token;
+        localStorage.setItem('vtx_token', token);
         localStorage.setItem('vtx_user', JSON.stringify(userObj));
         return { token, user: userObj };
       }
@@ -139,12 +196,13 @@ export class ApiService {
             id: loginAttempt.data.session.user.id,
             email: cleanEmail,
             fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
-            role: isSuperAdmin ? 'admin' : 'customer',
+            role: role,
             organizationId: loginAttempt.data.session.user.id,
             organizationName: companyName || `${cleanEmail.split('@')[0]}'s Cloud Devices`,
             plan: isSuperAdmin ? 'enterprise' : 'starter',
           };
           const token = loginAttempt.data.session.access_token;
+          localStorage.setItem('vtx_token', token);
           localStorage.setItem('vtx_user', JSON.stringify(userObj));
           return { token, user: userObj };
         }
@@ -322,8 +380,14 @@ export class ApiService {
     }
   }
 
+  static async getInviteInfo(token: string) {
+    return this.request<{ valid: boolean; email?: string; fullName?: string; orgName?: string; error?: string }>(
+      `/assignments/invite-info?token=${encodeURIComponent(token)}`
+    );
+  }
+
   static async inviteUser(email: string, fullName?: string) {
-    return this.request<{ success: boolean; user: any }>('/assignments/invite', {
+    return this.request<{ success: boolean; user: any; inviteUrl: string; token: string; message: string }>('/assignments/invite', {
       method: 'POST',
       body: JSON.stringify({ email, fullName }),
     });
@@ -340,6 +404,13 @@ export class ApiService {
     return this.request<{ success: boolean; message: string }>('/assignments/revoke', {
       method: 'POST',
       body: JSON.stringify({ deviceId, assignedUserId }),
+    });
+  }
+
+  static async revokeUser(assignedUserId: string) {
+    return this.request<{ success: boolean; message: string }>('/assignments/revoke-user', {
+      method: 'POST',
+      body: JSON.stringify({ assignedUserId }),
     });
   }
 

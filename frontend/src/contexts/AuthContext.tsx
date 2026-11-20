@@ -7,7 +7,7 @@ interface AuthContextType {
   user: User | null;
   loading: boolean;
   login: (email: string, password?: string) => Promise<void>;
-  register: (email: string, password: string, fullName: string, companyName?: string) => Promise<void>;
+  register: (email: string, password: string, fullName: string, companyName?: string, inviteToken?: string) => Promise<void>;
   logout: () => void;
   switchAccountDemo: (targetEmail: string) => Promise<void>;
 }
@@ -50,10 +50,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const register = async (email: string, password: string, fullName: string, companyName?: string) => {
+  const register = async (email: string, password: string, fullName: string, companyName?: string, inviteToken?: string) => {
     setLoading(true);
     try {
-      const resp = await ApiService.register(email, password, fullName, companyName);
+      const resp = await ApiService.register(email, password, fullName, companyName, inviteToken);
       localStorage.setItem('vtx_token', resp.token);
       setUser(resp.user);
     } finally {

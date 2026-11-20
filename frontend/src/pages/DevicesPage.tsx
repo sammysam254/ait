@@ -38,6 +38,14 @@ export const DevicesPage: React.FC = () => {
   const [assignControl, setAssignControl] = useState(false);
   const [assignMsg, setAssignMsg] = useState('');
 
+  // Worker Credentials Modal
+  const [workerCredsModal, setWorkerCredsModal] = useState<{
+    deviceName: string;
+    url: string;
+    pin: string;
+    fullUrl: string;
+  } | null>(null);
+
   useEffect(() => {
     loadDevices();
   }, [user]);
@@ -120,12 +128,16 @@ export const DevicesPage: React.FC = () => {
     }
   };
 
-  const copyDeviceCredentials = async (deviceId: string) => {
+  const copyDeviceCredentials = async (device: Device) => {
     try {
-      const creds = await ApiService.getDeviceCredentials(deviceId);
+      const creds = await ApiService.getDeviceCredentials(device.id);
       const fullUrl = `${window.location.origin}${creds.url}`;
-      handleCopy(`Access URL: ${fullUrl} | PIN: ${creds.pin}`, deviceId);
-      alert(`Copied!\nURL: ${fullUrl}\nPIN: ${creds.pin}`);
+      setWorkerCredsModal({
+        deviceName: device.device_name,
+        url: creds.url,
+        pin: creds.pin,
+        fullUrl,
+      });
     } catch (e: any) {
       alert(e.message || 'Failed to get credentials.');
     }
@@ -272,11 +284,11 @@ export const DevicesPage: React.FC = () => {
                     /* Assigned User Actions */
                     <div className="flex items-center gap-2 pt-1">
                       <button
-                        onClick={() => copyDeviceCredentials(device.id)}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-gray-800 text-gray-300 hover:text-white border border-gray-700 text-xs transition"
+                        onClick={() => copyDeviceCredentials(device)}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-semibold transition"
                       >
-                        <Copy className="h-3 w-3 text-indigo-400" />
-                        <span>Copy URL & PIN</span>
+                        <Copy className="h-3.5 w-3.5 text-indigo-400" />
+                        <span>Copy Link & PIN</span>
                       </button>
                     </div>
                   )}
@@ -461,6 +473,92 @@ export const DevicesPage: React.FC = () => {
               >
                 Confirm Device Assignment
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Worker Credentials Modal */}
+      {workerCredsModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-800 pb-3">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Key className="h-4 w-4 text-cyan-400" />
+                <span>Assigned Stream: {workerCredsModal.deviceName}</span>
+              </h3>
+              <button
+                onClick={() => setWorkerCredsModal(null)}
+                className="text-gray-400 hover:text-white text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <div className="space-y-1">
+                <label className="text-gray-400 font-semibold block text-[11px]">Direct Share URL</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={workerCredsModal.fullUrl}
+                    className="w-full px-3 py-2 rounded-xl bg-gray-950 border border-gray-800 text-cyan-300 font-mono text-[11px] select-all focus:outline-none"
+                  />
+                  <button
+                    onClick={() => handleCopy(workerCredsModal.fullUrl, 'work-url')}
+                    className="p-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 transition"
+                    title="Copy URL"
+                  >
+                    {copiedId === 'work-url' ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-gray-400 font-semibold block text-[11px]">Device Access PIN</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={workerCredsModal.pin}
+                    className="w-full px-3 py-2 rounded-xl bg-gray-950 border border-gray-800 text-yellow-300 font-mono text-lg font-bold tracking-widest text-center select-all focus:outline-none"
+                  />
+                  <button
+                    onClick={() => handleCopy(workerCredsModal.pin, 'work-pin')}
+                    className="p-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 transition"
+                    title="Copy PIN"
+                  >
+                    {copiedId === 'work-pin' ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3 bg-gray-950/80 border border-gray-800 rounded-xl text-gray-400 text-[11px] leading-relaxed">
+                You can open this stream link from any browser or smartphone anywhere in the world. As long as your assignment remains active, entering this PIN grants immediate viewing and remote control.
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const combined = `Stream URL: ${workerCredsModal.fullUrl}\nAccess PIN: ${workerCredsModal.pin}`;
+                    handleCopy(combined, 'work-all');
+                  }}
+                  className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition"
+                >
+                  {copiedId === 'work-all' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  <span>{copiedId === 'work-all' ? 'Copied Both to Clipboard!' : 'Copy Link & PIN'}</span>
+                </button>
+
+                <a
+                  href={workerCredsModal.fullUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 font-semibold text-xs flex items-center gap-1 transition"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  <span>Open Stream</span>
+                </a>
+              </div>
             </div>
           </div>
         </div>
