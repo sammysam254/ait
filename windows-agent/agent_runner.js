@@ -243,8 +243,8 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     msg.writeUInt16BE(width, 18);
     msg.writeUInt16BE(height, 20);
     msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
-    msg.writeUInt32BE(action === 0 ? 1 : 0, 24); // action_button: AMOTION_EVENT_BUTTON_PRIMARY on down
-    msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons: AMOTION_EVENT_BUTTON_PRIMARY active while touching
+    msg.writeUInt32BE(0, 24); // action_button = 0 (pure native touch, zero mouse button delay)
+    msg.writeUInt32BE(0, 28); // buttons = 0 (pure native capacitive touch)
     sock.write(msg);
     return true;
   } catch (e) {
@@ -498,22 +498,8 @@ let serialToDeviceIds = new Map(); // serial -> Set<deviceId>
 let serialToActiveDeviceId = new Map(); // serial -> active streaming deviceId
 let activeStreams = new Map();     // serial -> { stop, serial }
 let cachedKeyframes = new Map();   // serial -> Buffer
-let lastVideoFrameTimes = new Map(); // serial -> timestamp (ms)
 let ws = null;
 let isReconnecting = false;
-
-// Background watchdog: keeps video pipeline warm and alive during static/idle screens
-setInterval(() => {
-  const now = Date.now();
-  for (const [serial, lastTime] of lastVideoFrameTimes.entries()) {
-    if (now - lastTime >= 2500) {
-      const ctrl = controlSockets.get(serial);
-      if (ctrl && !ctrl.destroyed) {
-        try { ctrl.write(Buffer.from([17])); } catch (e) {}
-      }
-    }
-  }
-}, 2500);
 
 function connectWebSocket() {
   if (!config.agentAuthToken) {
@@ -776,7 +762,6 @@ function startStream(deviceId, targetSerial) {
           if (isConfig) {
             cachedConfig = packetData;
           } else if (isKeyframe) {
-            lastVideoFrameTimes.set(serial, Date.now());
             const fullKeyframe = cachedConfig ? Buffer.concat([cachedConfig, packetData]) : packetData;
             cachedKeyframes.set(serial, fullKeyframe);
             if (ws && ws.readyState === 1) {
@@ -787,7 +772,6 @@ function startStream(deviceId, targetSerial) {
             }
             framesSent++;
           } else {
-            lastVideoFrameTimes.set(serial, Date.now());
             if (ws && ws.readyState === 1) {
               // 256KB buffer limit: guarantees stream latency never exceeds ~100ms
               if (ws.bufferedAmount <= 256 * 1024) {

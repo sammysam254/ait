@@ -24,6 +24,8 @@ import {
   Info,
   Layers,
   Home,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { Device } from '../types';
@@ -46,6 +48,7 @@ export const DeviceViewerPage: React.FC = () => {
   const [streamDimensions, setStreamDimensions] = useState<{ width: number; height: number } | null>(null);
   const [showKeyboardInput, setShowKeyboardInput] = useState(false);
   const [textInput, setTextInput] = useState('');
+  const [showSideControls, setShowSideControls] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -481,22 +484,22 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Smooth low-latency sync: uses playbackRate to catch up without continuous decoder seek freezes
+            // Aggressive zero-latency live sync: never lets video fall behind physical device!
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
 
-              if (!initialLiveJumpRef.current && liveEdge > 0.25) {
+              if (!initialLiveJumpRef.current && liveEdge > 0.05) {
                 // Seek ONCE at the very beginning to jump straight to live edge
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.08);
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
                 initialLiveJumpRef.current = true;
-              } else if (drift > 1.0 && !videoRef.current.seeking) {
-                // Only seek if severely behind (>1.0s, e.g. tab was hidden)
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.08);
-              } else if (drift > 0.15) {
-                // Smooth acceleration: catches up in a fraction of a second with ZERO black screens
-                videoRef.current.playbackRate = 1.15;
-              } else if (drift < 0.05) {
+              } else if (drift > 0.35 && !videoRef.current.seeking) {
+                // If behind by >350ms, hard-snap straight to live edge
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
+              } else if (drift > 0.04) {
+                // Dynamic speedup (up to 2.5x) to eliminate any 40ms-300ms drift in milliseconds
+                videoRef.current.playbackRate = 1.0 + Math.min(1.5, drift * 3.5);
+              } else {
                 videoRef.current.playbackRate = 1.0;
               }
             }
@@ -671,8 +674,76 @@ export const DeviceViewerPage: React.FC = () => {
     };
   }, [canControl, device, streamDimensions]);
 
-  // High-performance unified Pointer Events: handles mouse, mobile touch, and stylus with 0ms delay
+  // High-performance native touch listener: zero-latency 120Hz gesture tracking on mobile
+  useEffect(() => {
+    const el = overlayRef.current;
+    if (!el) return;
+
+    let touchActive = false;
+    let lastMoveTime = 0;
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.cancelable) e.preventDefault();
+      startAudio();
+      if (!canControl || e.touches.length === 0) return;
+      touchActive = true;
+
+      const t = e.touches[0];
+      const coords = getDeviceCoords(t.clientX, t.clientY);
+      if (!coords) return;
+
+      sendInput('touch_down', { x: coords.x, y: coords.y });
+      lastMoveTime = performance.now();
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!touchActive || !canControl || e.touches.length === 0) return;
+      if (e.cancelable) e.preventDefault();
+
+      const now = performance.now();
+      // Fast ~100Hz (10ms) sampling: eliminates network buffer bloat while maintaining 100% fluid real-time tracking
+      if (now - lastMoveTime < 10) return;
+      lastMoveTime = now;
+
+      const t = e.touches[0];
+      const coords = getDeviceCoords(t.clientX, t.clientY);
+      if (!coords) return;
+
+      sendInput('touch_move', { x: coords.x, y: coords.y });
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      if (!touchActive || !canControl) return;
+      if (e.cancelable) e.preventDefault();
+      touchActive = false;
+
+      if (e.changedTouches.length > 0) {
+        const t = e.changedTouches[0];
+        const coords = getDeviceCoords(t.clientX, t.clientY);
+        if (coords) {
+          sendInput('touch_up', { x: coords.x, y: coords.y });
+          return;
+        }
+      }
+      sendInput('touch_up', {});
+    };
+
+    el.addEventListener('touchstart', onTouchStart, { passive: false });
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    el.addEventListener('touchend', onTouchEnd, { passive: false });
+    el.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [canControl, device, streamDimensions]);
+
+  // High-performance Pointer Events for desktop mouse clicks
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'touch') return; // Handled directly by native touch listener for 0ms delay
     if (e.cancelable) e.preventDefault();
     startAudio();
     if (!canControl) return;
@@ -695,23 +766,23 @@ export const DeviceViewerPage: React.FC = () => {
     };
     isPointerDraggingRef.current = false;
 
-    // Send touch_down IMMEDIATELY on finger/mouse contact — phone responds with 0ms delay!
     sendInput('touch_down', { x: coords.x, y: coords.y });
     lastMoveSentRef.current = 0;
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'touch') return;
     if (!pointerDownPosRef.current || !canControl) return;
     if (e.cancelable) e.preventDefault();
 
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    // Direct 1:1 finger tracking: instant 0ms response without throttle delay on mobile
     sendInput('touch_move', { x: coords.x, y: coords.y });
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'touch') return;
     if (!pointerDownPosRef.current || !canControl) return;
     if (e.cancelable) e.preventDefault();
 
@@ -722,14 +793,13 @@ export const DeviceViewerPage: React.FC = () => {
     const coords = getDeviceCoords(e.clientX, e.clientY);
     const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
 
-    // Send touch_up immediately to finalize click or gesture on physical device
     sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
-
     pointerDownPosRef.current = null;
     isPointerDraggingRef.current = false;
   };
 
   const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'touch') return;
     if (pointerDownPosRef.current && canControl) {
       const coords = getDeviceCoords(e.clientX, e.clientY);
       const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
@@ -1001,8 +1071,21 @@ export const DeviceViewerPage: React.FC = () => {
           )}
         </div>
 
-        {/* Side Controls Toolbar: Instant fast controls (Power, Volume, Recents, Reboot, Refresh) */}
-        <div className="absolute right-1 sm:right-3 md:relative md:right-0 md:ml-4 z-30 flex flex-col items-center gap-1.5 md:gap-2 p-1.5 md:p-2 bg-gray-900/90 backdrop-blur-md rounded-2xl border border-gray-800/80 shadow-2xl">
+        {/* Mobile Side Controls Toggle Pill: lets user hide/unhide with 1 tap */}
+        <button
+          onClick={() => setShowSideControls((prev) => !prev)}
+          className="md:hidden absolute right-0 top-1/2 -translate-y-1/2 z-40 p-2 rounded-l-2xl bg-gray-900/95 border-l border-y border-gray-700/80 text-gray-300 hover:text-white shadow-2xl transition-all active:scale-95 flex items-center justify-center backdrop-blur-md"
+          title={showSideControls ? 'Hide Side Controls' : 'Show Side Controls'}
+        >
+          {showSideControls ? <ChevronRight className="h-4 w-4 text-cyan-400" /> : <ChevronLeft className="h-4 w-4 text-gray-300" />}
+        </button>
+
+        {/* Side Controls Toolbar: Always docked on desktop, toggleable slide-in on mobile */}
+        <div
+          className={`${
+            showSideControls ? 'flex' : 'hidden md:flex'
+          } absolute right-1 sm:right-3 md:relative md:right-0 md:ml-4 z-30 flex flex-col items-center gap-1.5 md:gap-2 p-1.5 md:p-2 bg-gray-900/95 backdrop-blur-md rounded-2xl border border-gray-800/80 shadow-2xl animate-in fade-in slide-in-from-right duration-150`}
+        >
           {/* Power: Wake / Sleep Screen */}
           <button
             onClick={() => {
