@@ -4,6 +4,8 @@ import JMuxer from 'jmuxer';
 import {
   Smartphone,
   RotateCw,
+  RotateCcw,
+  RefreshCw,
   ArrowLeft,
   Square,
   Circle,
@@ -13,11 +15,15 @@ import {
   Sliders,
   Radio,
   Wifi,
+  Power,
   PowerOff,
+  Volume1,
   Volume2,
   VolumeX,
   Keyboard,
   Info,
+  Layers,
+  Home,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { Device } from '../types';
@@ -586,11 +592,50 @@ export const DeviceViewerPage: React.FC = () => {
     }));
   };
 
+  const refreshStream = () => {
+    if (videoRef.current) {
+      if (jmuxerRef.current) {
+        try { jmuxerRef.current.destroy(); } catch (e) {}
+      }
+      try {
+        jmuxerRef.current = new JMuxer({
+          node: videoRef.current,
+          mode: 'video',
+          flushingTime: 0,
+          fps: 60,
+          clearBuffer: true,
+          debug: false,
+        });
+        if (typeof jmuxerRef.current.stopInterval === 'function') {
+          jmuxerRef.current.stopInterval();
+        }
+      } catch (err) {}
+      videoRef.current.currentTime = 0;
+      videoRef.current.play().catch(() => {});
+    }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      const currentDeviceId = activeDeviceIdRef.current || id;
+      wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: currentDeviceId }));
+      wsRef.current.send(JSON.stringify({ type: 'request-stream', deviceId: currentDeviceId }));
+    }
+  };
+
+  const handleRebootDevice = () => {
+    if (!canControl) return;
+    if (window.confirm(`Are you sure you want to reboot ${device?.device_name || 'this Android device'} now?`)) {
+      sendInput('reboot');
+      setStatus('connecting');
+      setTimeout(() => {
+        refreshStream();
+      }, 5000);
+    }
+  };
+
   const lastMoveSentRef = useRef(0);
   const pointerDownPosRef = useRef<{ x: number; y: number; clientX: number; clientY: number; time: number } | null>(null);
   const isPointerDraggingRef = useRef(false);
 
-  // Active (non-passive) wheel listener to cleanly prevent browser scroll and send instant swipes
+  // Active (non-passive) wheel listener: proportional native scrolling without massive full-screen flings
   useEffect(() => {
     const el = overlayRef.current;
     if (!el) return;
@@ -600,24 +645,23 @@ export const DeviceViewerPage: React.FC = () => {
       if (!canControl) return;
 
       const now = performance.now();
-      // Fast, natural wheel response (140ms debounce) for smooth list and feed scrolling
-      if (now - lastWheelTimeRef.current < 140) return;
+      if (now - lastWheelTimeRef.current < 60) return;
       lastWheelTimeRef.current = now;
 
-      const isDown = e.deltaY > 0;
       const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
       const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
-      const midX = Math.round(deviceWidth / 2);
-      // Realistic human flick stroke
-      const startY = isDown ? Math.round(deviceHeight * 0.72) : Math.round(deviceHeight * 0.28);
-      const endY = isDown ? Math.round(deviceHeight * 0.25) : Math.round(deviceHeight * 0.75);
+      const coords = getDeviceCoords(e.clientX, e.clientY) || {
+        x: Math.round(deviceWidth / 2),
+        y: Math.round(deviceHeight / 2),
+      };
 
-      sendInput('swipe', {
-        startX: midX,
-        startY,
-        endX: midX,
-        endY,
-        durationMs: 80,
+      // Proportional smooth scroll delta — no more massive whole-screen flings!
+      const scrollStep = Math.sign(e.deltaY) * Math.min(120, Math.max(40, Math.abs(e.deltaY)));
+      sendInput('scroll', {
+        x: coords.x,
+        y: coords.y,
+        hScroll: 0,
+        vScroll: scrollStep,
       });
     };
 
@@ -627,13 +671,12 @@ export const DeviceViewerPage: React.FC = () => {
     };
   }, [canControl, device, streamDimensions]);
 
-  // High-performance unified Pointer Events: handles mouse, mobile touch, and stylus with zero delay
+  // High-performance unified Pointer Events: handles mouse, mobile touch, and stylus with 0ms delay
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.cancelable) e.preventDefault();
     startAudio();
     if (!canControl) return;
 
-    // Focus overlay for physical keyboard capture
     if (overlayRef.current) overlayRef.current.focus();
 
     const coords = getDeviceCoords(e.clientX, e.clientY);
@@ -654,7 +697,7 @@ export const DeviceViewerPage: React.FC = () => {
 
     // Send touch_down IMMEDIATELY on finger/mouse contact — phone responds with 0ms delay!
     sendInput('touch_down', { x: coords.x, y: coords.y });
-    lastMoveSentRef.current = 0; // 0 allows the very first movement delta to transmit immediately without throttle delay
+    lastMoveSentRef.current = 0;
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -664,12 +707,8 @@ export const DeviceViewerPage: React.FC = () => {
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    // Instant initial gesture response + smooth 80Hz (12ms) tracking for fluid swiping
-    const now = performance.now();
-    if (lastMoveSentRef.current === 0 || now - lastMoveSentRef.current >= 12) {
-      lastMoveSentRef.current = now;
-      sendInput('touch_move', { x: coords.x, y: coords.y });
-    }
+    // Direct 1:1 finger tracking: instant 0ms response without throttle delay on mobile
+    sendInput('touch_move', { x: coords.x, y: coords.y });
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -756,19 +795,19 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   return (
-    <div ref={containerRef} className="h-full flex flex-col space-y-4">
-      {/* Top Controls Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4 p-4 bg-gray-900/80 border border-gray-800 rounded-2xl backdrop-blur">
-        <div className="flex items-center gap-3">
+    <div ref={containerRef} style={{ touchAction: 'none' }} className="h-full flex flex-col space-y-2 md:space-y-4 select-none">
+      {/* Top Controls Bar: Responsive on mobile & desktop */}
+      <div className="flex flex-wrap items-center justify-between gap-2 md:gap-4 p-2.5 md:p-4 bg-gray-900/90 border border-gray-800 rounded-xl md:rounded-2xl backdrop-blur shrink-0">
+        <div className="flex items-center gap-2 md:gap-3">
           <button
             onClick={() => navigate('/devices')}
-            className="p-2 rounded-xl bg-gray-800 text-gray-300 hover:text-white transition"
+            className="p-1.5 md:p-2 rounded-lg md:rounded-xl bg-gray-800 text-gray-300 hover:text-white transition"
           >
             <ArrowLeft className="h-4 w-4" />
           </button>
           <div>
-            <h2 className="text-base font-bold text-white flex items-center gap-2">
-              <span>{device?.device_name || 'Android Device'}</span>
+            <h2 className="text-sm md:text-base font-bold text-white flex items-center gap-2">
+              <span className="truncate max-w-[140px] md:max-w-none">{device?.device_name || 'Android Device'}</span>
               <span
                 className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
                   status === 'connected'
@@ -779,22 +818,22 @@ export const DeviceViewerPage: React.FC = () => {
                 {status}
               </span>
             </h2>
-            <div className="text-xs text-gray-400">
+            <div className="text-[10px] md:text-xs text-gray-400">
               {device?.manufacturer} {device?.model} • Android {device?.android_version}
             </div>
           </div>
         </div>
 
-        {/* Status Indicators & Quality Selector */}
-        <div className="flex items-center gap-3 text-xs">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-800/80 border border-gray-700/60 text-gray-300">
+        {/* Status Indicators & Action Buttons */}
+        <div className="flex items-center gap-1.5 md:gap-3 text-xs">
+          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-800/80 border border-gray-700/60 text-gray-300">
             <Radio className="h-3.5 w-3.5 text-emerald-400 animate-pulse" />
             <span>{fps} FPS</span>
             <span className="text-gray-500">|</span>
             <span>{latency}ms</span>
           </div>
 
-          <div className="flex items-center gap-1 bg-gray-800/80 border border-gray-700/60 rounded-lg p-0.5 text-xs">
+          <div className="hidden md:flex items-center gap-1 bg-gray-800/80 border border-gray-700/60 rounded-lg p-0.5 text-xs">
             {(['high', 'medium', 'low'] as const).map((q) => (
               <button
                 key={q}
@@ -810,7 +849,7 @@ export const DeviceViewerPage: React.FC = () => {
 
           <button
             onClick={toggleAudio}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`flex items-center gap-1.5 px-2 md:px-3 py-1 md:py-1.5 rounded-lg text-xs font-semibold transition ${
               !isMuted
                 ? 'bg-blue-600/30 text-blue-400 border border-blue-500/40 shadow-lg shadow-blue-500/20'
                 : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700'
@@ -818,13 +857,13 @@ export const DeviceViewerPage: React.FC = () => {
             title={isMuted ? 'Click to Enable Audio' : 'Click to Mute Audio'}
           >
             {!isMuted ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
-            <span>{!isMuted ? 'Audio: LIVE' : 'Audio: MUTED'}</span>
+            <span className="hidden sm:inline">{!isMuted ? 'Audio: LIVE' : 'Audio: MUTED'}</span>
           </button>
 
           <button
             onClick={() => setShowKeyboardInput(!showKeyboardInput)}
             disabled={!canControl}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+            className={`flex items-center gap-1.5 px-2 md:px-3 py-1 md:py-1.5 rounded-lg text-xs font-semibold transition ${
               showKeyboardInput
                 ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30'
                 : 'bg-gray-800 text-gray-300 hover:text-white border border-gray-700'
@@ -832,20 +871,15 @@ export const DeviceViewerPage: React.FC = () => {
             title="Type or paste text directly into remote device"
           >
             <Keyboard className="h-3.5 w-3.5" />
-            <span>Type Text</span>
+            <span className="hidden sm:inline">Type</span>
           </button>
 
           <button
-            onClick={() => setCanControl(!canControl)}
-            disabled={!permissions?.can_control}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-              canControl
-                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30'
-                : 'bg-gray-800 text-gray-400 hover:text-gray-200 border border-gray-700'
-            }`}
+            onClick={refreshStream}
+            className="p-1 md:px-2.5 md:py-1.5 rounded-lg bg-gray-800 hover:bg-cyan-600/20 text-cyan-400 border border-gray-700 hover:border-cyan-500/40 transition active:scale-95"
+            title="Refresh Stream Now"
           >
-            <Sliders className="h-3.5 w-3.5" />
-            <span>{canControl ? 'Control: ACTIVE' : 'Control: OFF'}</span>
+            <RotateCcw className="h-3.5 w-3.5" />
           </button>
 
           <button
@@ -889,8 +923,9 @@ export const DeviceViewerPage: React.FC = () => {
         </form>
       )}
 
-      {/* Screen Viewer Centerpiece: Dynamic aspect ratio decided by active scrcpy stream */}
-      <div className="flex-1 flex flex-col items-center justify-center p-0 md:p-2 relative min-h-0 w-full overflow-hidden">
+      {/* Screen Viewer Centerpiece: Dynamic aspect ratio filling mobile/desktop viewports */}
+      <div className="flex-1 flex items-center justify-center p-0 md:p-2 relative min-h-0 w-full overflow-hidden">
+        {/* Device Container: Maximizes space on mobile, elegant frame on desktop */}
         <div
           style={{
             aspectRatio: (videoRef.current?.videoWidth && videoRef.current?.videoHeight)
@@ -900,8 +935,9 @@ export const DeviceViewerPage: React.FC = () => {
               : (device?.screen_width && device?.screen_height)
               ? `${device.screen_width} / ${device.screen_height}`
               : '9 / 19.5',
+            touchAction: 'none',
           }}
-          className="relative h-full max-h-[calc(100vh-140px)] w-auto max-w-full rounded-2xl md:rounded-3xl bg-black border-2 md:border-4 border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center transition-all duration-200"
+          className="relative h-full max-h-[calc(100dvh-70px)] md:max-h-[calc(100vh-140px)] w-auto max-w-full rounded-lg md:rounded-3xl bg-black border border-gray-800/80 md:border-4 md:border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center transition-all duration-200"
         >
           {/* Hardware Accelerated ws-scrcpy Video Player */}
           <video
@@ -965,40 +1001,102 @@ export const DeviceViewerPage: React.FC = () => {
           )}
         </div>
 
-        {/* Android Navigation Bar */}
-        <div className="mt-3 flex items-center justify-center gap-6 px-6 py-2.5 rounded-full bg-gray-900/90 border border-gray-800 shadow-xl">
+        {/* Side Controls Toolbar: Instant fast controls (Power, Volume, Recents, Reboot, Refresh) */}
+        <div className="absolute right-1 sm:right-3 md:relative md:right-0 md:ml-4 z-30 flex flex-col items-center gap-1.5 md:gap-2 p-1.5 md:p-2 bg-gray-900/90 backdrop-blur-md rounded-2xl border border-gray-800/80 shadow-2xl">
+          {/* Power: Wake / Sleep Screen */}
           <button
-            onClick={() => sendInput('back', {})}
+            onClick={() => {
+              sendInput('power');
+              setTimeout(refreshStream, 250);
+            }}
             disabled={!canControl}
-            className="p-2 rounded-full hover:bg-gray-800 text-gray-300 hover:text-white transition active:scale-95 disabled:opacity-40"
-            title="Back (KEYCODE_BACK)"
+            className="p-2 md:p-2.5 rounded-xl hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 transition active:scale-90 active:bg-rose-500/30"
+            title="Power (Wake / Sleep Screen)"
           >
-            <ArrowLeft className="h-5 w-5" />
+            <Power className="h-4 w-4 md:h-5 md:w-5" />
           </button>
+
+          {/* Volume Up */}
           <button
-            onClick={() => sendInput('home', {})}
+            onClick={() => sendInput('volume_up')}
             disabled={!canControl}
-            className="p-2 rounded-full hover:bg-gray-800 text-gray-300 hover:text-white transition active:scale-95 disabled:opacity-40"
-            title="Home (KEYCODE_HOME)"
+            className="p-2 md:p-2.5 rounded-xl hover:bg-emerald-500/20 text-emerald-400 hover:text-emerald-300 transition active:scale-90 active:bg-emerald-500/30"
+            title="Volume Up"
           >
-            <Circle className="h-5 w-5" />
+            <Volume2 className="h-4 w-4 md:h-5 md:w-5" />
           </button>
+
+          {/* Volume Down */}
           <button
-            onClick={() => sendInput('recents', {})}
+            onClick={() => sendInput('volume_down')}
             disabled={!canControl}
-            className="p-2 rounded-full hover:bg-gray-800 text-gray-300 hover:text-white transition active:scale-95 disabled:opacity-40"
-            title="Recent Apps (KEYCODE_APP_SWITCH)"
+            className="p-2 md:p-2.5 rounded-xl hover:bg-emerald-500/20 text-emerald-400 hover:text-emerald-300 transition active:scale-90 active:bg-emerald-500/30"
+            title="Volume Down"
           >
-            <Square className="h-4 w-4" />
+            <Volume1 className="h-4 w-4 md:h-5 md:w-5" />
           </button>
-          <div className="w-[1px] h-4 bg-gray-700"></div>
+
+          <div className="w-4 h-[1px] bg-gray-700/80 my-0.5"></div>
+
+          {/* Recent Apps */}
+          <button
+            onClick={() => sendInput('recents')}
+            disabled={!canControl}
+            className="p-2 md:p-2.5 rounded-xl hover:bg-purple-500/20 text-purple-400 hover:text-purple-300 transition active:scale-90 active:bg-purple-500/30"
+            title="Recent Apps (Overview)"
+          >
+            <Layers className="h-4 w-4 md:h-5 md:w-5" />
+          </button>
+
+          {/* Home */}
+          <button
+            onClick={() => sendInput('home')}
+            disabled={!canControl}
+            className="p-2 md:p-2.5 rounded-xl hover:bg-blue-500/20 text-blue-400 hover:text-blue-300 transition active:scale-90 active:bg-blue-500/30"
+            title="Home Screen"
+          >
+            <Circle className="h-4 w-4 md:h-5 md:w-5" />
+          </button>
+
+          {/* Back */}
+          <button
+            onClick={() => sendInput('back')}
+            disabled={!canControl}
+            className="p-2 md:p-2.5 rounded-xl hover:bg-amber-500/20 text-amber-400 hover:text-amber-300 transition active:scale-90 active:bg-amber-500/30"
+            title="Back"
+          >
+            <ArrowLeft className="h-4 w-4 md:h-5 md:w-5" />
+          </button>
+
+          <div className="w-4 h-[1px] bg-gray-700/80 my-0.5"></div>
+
+          {/* Rotate Orientation */}
           <button
             onClick={() => sendInput('rotate', { orientation: 'landscape' })}
             disabled={!canControl}
-            className="p-2 rounded-full hover:bg-gray-800 text-gray-300 hover:text-white transition active:scale-95 disabled:opacity-40"
-            title="Toggle Screen Orientation"
+            className="p-2 md:p-2.5 rounded-xl hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition active:scale-90 active:bg-indigo-500/30"
+            title="Rotate Screen Orientation"
           >
-            <RotateCw className="h-4 w-4" />
+            <RotateCw className="h-4 w-4 md:h-5 md:w-5" />
+          </button>
+
+          {/* Refresh Stream */}
+          <button
+            onClick={refreshStream}
+            className="p-2 md:p-2.5 rounded-xl hover:bg-cyan-500/20 text-cyan-400 hover:text-cyan-300 transition active:scale-90 active:bg-cyan-500/30"
+            title="Refresh Stream Now"
+          >
+            <RotateCcw className="h-4 w-4 md:h-5 md:w-5" />
+          </button>
+
+          {/* Reboot Device */}
+          <button
+            onClick={handleRebootDevice}
+            disabled={!canControl}
+            className="p-2 md:p-2.5 rounded-xl hover:bg-red-500/20 text-red-400 hover:text-red-300 transition active:scale-90 active:bg-red-500/30"
+            title="Reboot Android Device"
+          >
+            <RefreshCw className="h-4 w-4 md:h-5 md:w-5" />
           </button>
         </div>
       </div>

@@ -401,6 +401,27 @@ async function injectInput(serial, action, data) {
         case 'recents':
           sendScrcpyKeycode(sock, 187); // AKEYCODE_APP_SWITCH
           return true;
+        case 'power':
+          sendScrcpyKeycode(sock, 26); // AKEYCODE_POWER
+          // Trigger immediate keyframe generation upon screen power toggle
+          setTimeout(() => {
+            const s = controlSockets.get(serial);
+            if (s && !s.destroyed) {
+              try { s.write(Buffer.from([17])); } catch (e) {}
+            }
+          }, 150);
+          return true;
+        case 'volume_up':
+          sendScrcpyKeycode(sock, 24); // AKEYCODE_VOLUME_UP
+          return true;
+        case 'volume_down':
+          sendScrcpyKeycode(sock, 25); // AKEYCODE_VOLUME_DOWN
+          return true;
+        case 'reboot':
+          try {
+            execFile(adbPath, ['-s', serial, 'reboot'], () => {});
+          } catch (e) {}
+          return true;
       }
     }
 
@@ -438,6 +459,20 @@ async function injectInput(serial, action, data) {
       case 'recents':
         sendShellInput(serial, 'input keyevent 187');
         return true;
+      case 'power':
+        sendShellInput(serial, 'input keyevent 26');
+        return true;
+      case 'volume_up':
+        sendShellInput(serial, 'input keyevent 24');
+        return true;
+      case 'volume_down':
+        sendShellInput(serial, 'input keyevent 25');
+        return true;
+      case 'reboot':
+        try {
+          execFile(adbPath, ['-s', serial, 'reboot'], () => {});
+        } catch (e) {}
+        return true;
       case 'rotate':
         const r = data && data.orientation === 'landscape' ? '1' : '0';
         sendShellInput(serial, `settings put system user_rotation ${r}`);
@@ -463,8 +498,22 @@ let serialToDeviceIds = new Map(); // serial -> Set<deviceId>
 let serialToActiveDeviceId = new Map(); // serial -> active streaming deviceId
 let activeStreams = new Map();     // serial -> { stop, serial }
 let cachedKeyframes = new Map();   // serial -> Buffer
+let lastVideoFrameTimes = new Map(); // serial -> timestamp (ms)
 let ws = null;
 let isReconnecting = false;
+
+// Background watchdog: keeps video pipeline warm and alive during static/idle screens
+setInterval(() => {
+  const now = Date.now();
+  for (const [serial, lastTime] of lastVideoFrameTimes.entries()) {
+    if (now - lastTime >= 2500) {
+      const ctrl = controlSockets.get(serial);
+      if (ctrl && !ctrl.destroyed) {
+        try { ctrl.write(Buffer.from([17])); } catch (e) {}
+      }
+    }
+  }
+}, 2500);
 
 function connectWebSocket() {
   if (!config.agentAuthToken) {
@@ -573,6 +622,7 @@ async function handleMessage(msg) {
       break;
     }
 
+    case 'refresh-stream':
     case 'request-keyframe': {
       const { deviceId, serial } = msg;
       const targetSerial = serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || (activeStreams.keys().next().value) || '';
@@ -726,6 +776,7 @@ function startStream(deviceId, targetSerial) {
           if (isConfig) {
             cachedConfig = packetData;
           } else if (isKeyframe) {
+            lastVideoFrameTimes.set(serial, Date.now());
             const fullKeyframe = cachedConfig ? Buffer.concat([cachedConfig, packetData]) : packetData;
             cachedKeyframes.set(serial, fullKeyframe);
             if (ws && ws.readyState === 1) {
@@ -736,6 +787,7 @@ function startStream(deviceId, targetSerial) {
             }
             framesSent++;
           } else {
+            lastVideoFrameTimes.set(serial, Date.now());
             if (ws && ws.readyState === 1) {
               // 256KB buffer limit: guarantees stream latency never exceeds ~100ms
               if (ws.bufferedAmount <= 256 * 1024) {
