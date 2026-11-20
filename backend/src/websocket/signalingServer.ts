@@ -316,6 +316,31 @@ export class SignalingServer {
             break;
           }
 
+          case 'device-dimensions': {
+            const { deviceId, width, height } = msg;
+            const targetDevId = deviceId || session.deviceId;
+            if (targetDevId && width && height) {
+              const dev = inMemoryDb.devices.get(targetDevId);
+              if (dev) {
+                dev.screen_width = width;
+                dev.screen_height = height;
+                dev.updated_at = new Date().toISOString();
+              }
+              const room = this.getRoom(targetDevId);
+              for (const viewer of room.viewers) {
+                if (viewer.ws.readyState === WebSocket.OPEN) {
+                  viewer.ws.send(JSON.stringify({
+                    type: 'device-dimensions',
+                    deviceId: targetDevId,
+                    width,
+                    height,
+                  }));
+                }
+              }
+            }
+            break;
+          }
+
           case 'ping': {
             if (session.ws.readyState === WebSocket.OPEN) {
               session.ws.send(JSON.stringify({ type: 'pong' }));
@@ -380,6 +405,15 @@ export class SignalingServer {
       canView: session.canView,
       agentOnline: !!room.agent,
     }));
+
+    if (dev && dev.screen_width && dev.screen_height) {
+      session.ws.send(JSON.stringify({
+        type: 'device-dimensions',
+        deviceId,
+        width: dev.screen_width,
+        height: dev.screen_height,
+      }));
+    }
 
     // If we have cached SPS/PPS header, send it immediately so the player starts with zero delay
     if (room.lastHeader && session.ws.readyState === WebSocket.OPEN) {

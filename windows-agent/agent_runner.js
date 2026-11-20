@@ -7,6 +7,14 @@ const fs = require('fs');
 const path = require('path');
 const net = require('net');
 
+// Process-wide crash protection so host agent never exits on transient stream or socket errors
+process.on('uncaughtException', (err) => {
+  console.error('[Agent uncaughtException]', err ? (err.message || err) : 'unknown');
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Agent unhandledRejection]', reason ? (reason.message || reason) : 'unknown');
+});
+
 // Single instance lock to prevent duplicate scrcpy capture processes
 const LOCK_PORT = 47155;
 const lockServer = net.createServer();
@@ -173,6 +181,14 @@ function getDeviceShell(serial) {
   let proc = shellSessions.get(serial);
   if (!proc || proc.killed) {
     proc = spawn(adbPath, ['-s', serial, 'shell'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    if (proc.stdin) {
+      proc.stdin.on('error', (err) => {
+        console.warn(`[Shell] stdin error on ${serial}:`, err.message);
+      });
+    }
+    proc.on('error', (err) => {
+      console.warn(`[Shell] proc error on ${serial}:`, err.message);
+    });
     shellSessions.set(serial, proc);
     proc.on('exit', () => shellSessions.delete(serial));
   }
@@ -216,6 +232,7 @@ function sendScrcpyScroll(sock, x, y, width = 720, height = 1600, hScroll = 0, v
 
 function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
   try {
+    if (!sock || sock.destroyed) return false;
     // 32-byte SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT (type = 2)
     const msg = Buffer.alloc(32);
     msg.writeUInt8(2, 0); // type: INJECT_TOUCH_EVENT
@@ -235,8 +252,25 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
   }
 }
 
+function sendScrcpyText(sock, text) {
+  try {
+    if (!sock || sock.destroyed || !text) return false;
+    const textBuf = Buffer.from(text, 'utf8');
+    // SC_CONTROL_MSG_TYPE_INJECT_TEXT (type = 1): 1 byte type, 4 bytes length, text bytes
+    const msg = Buffer.alloc(5 + textBuf.length);
+    msg.writeUInt8(1, 0); // type: INJECT_TEXT
+    msg.writeUInt32BE(textBuf.length, 1);
+    textBuf.copy(msg, 5);
+    sock.write(msg);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 function sendScrcpyKeycode(sock, keycode) {
   try {
+    if (!sock || sock.destroyed || keycode === undefined) return false;
     // 14-byte SC_CONTROL_MSG_TYPE_INJECT_KEYCODE (type = 0)
     // DOWN
     const down = Buffer.alloc(14);
@@ -279,6 +313,7 @@ async function wakePhone(serial) {
 
 async function injectInput(serial, action, data) {
   try {
+    if (!data) data = {};
     const sock = controlSockets.get(serial);
     const dims = deviceDimensions.get(serial);
     const targetW = dims ? dims.width : (data.width || 720);
@@ -309,10 +344,21 @@ async function injectInput(serial, action, data) {
         case 'tap':
           sendScrcpyTouch(sock, 0, x, y, targetW, targetH);
           setTimeout(() => {
-            if (controlSockets.has(serial)) {
-              sendScrcpyTouch(controlSockets.get(serial), 1, x, y, targetW, targetH);
+            const s = controlSockets.get(serial);
+            if (s && !s.destroyed) {
+              sendScrcpyTouch(s, 1, x, y, targetW, targetH);
             }
           }, 35);
+          return true;
+        case 'text':
+          if (data && data.text) {
+            return sendScrcpyText(sock, data.text);
+          }
+          return true;
+        case 'key_event':
+          if (data && data.keyCode !== undefined) {
+            return sendScrcpyKeycode(sock, data.keyCode);
+          }
           return true;
         case 'swipe': {
           const sx = scaleX(data.startX);
@@ -347,31 +393,15 @@ async function injectInput(serial, action, data) {
         }
         case 'back':
           sendScrcpyKeycode(sock, 4); // AKEYCODE_BACK
-          setTimeout(() => {
-            const ctrl = controlSockets.get(serial);
-            if (ctrl && !ctrl.destroyed) {
-              try { ctrl.write(Buffer.from([17])); } catch (e) {}
-            }
-          }, 250);
           return true;
         case 'home':
           sendScrcpyKeycode(sock, 3); // AKEYCODE_HOME
-          setTimeout(() => {
-            const ctrl = controlSockets.get(serial);
-            if (ctrl && !ctrl.destroyed) {
-              try { ctrl.write(Buffer.from([17])); } catch (e) {}
-            }
-          }, 250);
           return true;
         case 'recents':
           sendScrcpyKeycode(sock, 187); // AKEYCODE_APP_SWITCH
-          setTimeout(() => {
-            const ctrl = controlSockets.get(serial);
-            if (ctrl && !ctrl.destroyed) {
-              try { ctrl.write(Buffer.from([17])); } catch (e) {}
-            }
-          }, 250);
           return true;
+      }
+    }
       }
     }
 
@@ -654,7 +684,7 @@ function startStream(deviceId, targetSerial) {
       // 3. Set up ADB reverse tunnel
       await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${scid}`, `tcp:${port}`]);
 
-      // 4. Accept the 3 scrcpy sockets (Video -> Audio -> Control)
+      // 4. Accept the scrcpy sockets (Video -> Control; audio disabled to guarantee 0 audio crashes & ultra-low latency)
       server.on('connection', (sock) => {
         if (!active) {
           sock.destroy();
@@ -662,18 +692,22 @@ function startStream(deviceId, targetSerial) {
         }
 
         try { sock.setNoDelay(true); } catch (e) {}
+        sock.on('error', (err) => {
+          console.warn(`[StreamBridge] Socket error on ${serial}:`, err.message);
+        });
 
         if (!videoSock) {
           videoSock = sock;
           setupVideoSocket(sock);
-        } else if (!audioSock) {
-          audioSock = sock;
-          setupAudioSocket(sock);
         } else if (!controlSock) {
           controlSock = sock;
           controlSockets.set(serial, sock);
           console.log(`[StreamBridge] 🎮 Native Scrcpy Control channel active for ${serial} (instant no-delay)`);
         }
+      });
+
+      server.on('error', (err) => {
+        console.error(`[StreamBridge] Server socket error for ${serial}:`, err.message);
       });
 
       const AUD_PREFIX = Buffer.from('AUD:');
@@ -701,9 +735,23 @@ function startStream(deviceId, targetSerial) {
             const width = buf.readUInt32BE(68);
             const height = buf.readUInt32BE(72);
             deviceDimensions.set(serial, { width, height });
-            console.log(`[StreamBridge] 📱 Scrcpy Video Ready: ${deviceName} [${width}x${height}, ${codec}]`);
+            console.log(`[StreamBridge] 📱 Scrcpy Video Ready: ${deviceName} [${width}x${height}, ${codec}] (scrcpy selected screen)`);
             buf = buf.subarray(76);
             parsedHeader = true;
+
+            // Broadcast ground-truth scrcpy screen dimensions to cloud backend & viewers
+            if (ws && ws.readyState === 1) {
+              const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+              try {
+                ws.send(JSON.stringify({
+                  type: 'device-dimensions',
+                  deviceId: targetDevId,
+                  serial,
+                  width,
+                  height,
+                }));
+              } catch (e) {}
+            }
           }
 
           if (parsedHeader) {
@@ -836,8 +884,8 @@ function startStream(deviceId, targetSerial) {
         sock.on('error', () => {});
       }
 
-      // 5. Spawn scrcpy-server with ultra-low latency profile (MediaCodec low-latency:int=1)
-      scrcpyProc = spawn(adbPath, [
+      // 5. Spawn scrcpy-server with ultra-low latency profile, letting scrcpy dynamically decide display screen
+      const scrcpyServerArgs = [
         '-s', serial,
         'shell',
         'CLASSPATH=/data/local/tmp/scrcpy-server.jar',
@@ -846,30 +894,43 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'max_size=1080',
-        'video_bit_rate=2500000',
+        'video_bit_rate=4000000',
+        'max_fps=60',
         'stay_awake=true',
         'control=true',
-        'audio=true',
-        'audio_codec=raw',
+        'audio=false', // Disabled: prevents keyboard click sounds & system audio from crashing the stream
         'video_codec_options=low-latency:int=1',
-      ]);
+        'downsize_on_error=true',
+      ];
+      scrcpyProc = spawn(adbPath, scrcpyServerArgs);
 
       scrcpyProc.stdout.on('data', (d) => {
         const text = d.toString().trim();
-        if (text.includes('Device:')) console.log('[scrcpy]', text);
+        if (text.includes('Device:') || text.includes('ERROR') || text.includes('WARN')) {
+          console.log('[scrcpy]', text);
+        }
       });
 
-      scrcpyProc.on('exit', () => {
+      scrcpyProc.stderr.on('data', (d) => {
+        const text = d.toString().trim();
+        if (text) console.warn('[scrcpy err]', text);
+      });
+
+      scrcpyProc.on('error', (err) => {
+        console.error(`[StreamBridge] scrcpy process error for ${serial}:`, err.message);
+      });
+
+      scrcpyProc.on('exit', (code) => {
+        console.warn(`[StreamBridge] scrcpy process exited for ${serial} (code: ${code}). Auto-recovering in 1s...`);
         if (active) {
           activeStreams.delete(serial);
-          setTimeout(() => startStream(deviceId, serial), 1500);
+          setTimeout(() => startStream(deviceId, serial), 1000);
         }
       });
     } catch (err) {
       console.error(`[StreamBridge] Pure scrcpy pipeline error for ${serial}:`, err.message);
       activeStreams.delete(serial);
-      if (active) setTimeout(() => startStream(deviceId, serial), 3000);
+      if (active) setTimeout(() => startStream(deviceId, serial), 2000);
     }
   })();
 }

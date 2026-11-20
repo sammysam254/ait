@@ -37,6 +37,9 @@ export const DeviceViewerPage: React.FC = () => {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [quality, setQuality] = useState<'high' | 'medium' | 'low'>('high');
   const [isMuted, setIsMuted] = useState(false);
+  const [streamDimensions, setStreamDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [showKeyboardInput, setShowKeyboardInput] = useState(false);
+  const [textInput, setTextInput] = useState('');
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -362,6 +365,10 @@ export const DeviceViewerPage: React.FC = () => {
             if (msg.canControl !== undefined) setCanControl(msg.canControl);
             const reqId = activeDeviceIdRef.current || id;
             ws.send(JSON.stringify({ type: 'request-stream', deviceId: reqId }));
+          } else if (msg.type === 'device-dimensions') {
+            if (msg.width && msg.height) {
+              setStreamDimensions({ width: msg.width, height: msg.height });
+            }
           } else if (msg.type === 'device-offline') {
             console.warn('[Viewer] Device stream offline signaled. Retrying in background...');
             setStatus('offline');
@@ -485,14 +492,14 @@ export const DeviceViewerPage: React.FC = () => {
     };
   };
 
-  // Convert overlay click/touch coordinates to Android device physical coordinates
+  // Dynamic screen dimensions decided directly by active scrcpy stream
   const getDeviceCoords = (clientX: number, clientY: number) => {
     const el = overlayRef.current;
-    if (!el || !device) return null;
+    if (!el) return null;
 
     const rect = el.getBoundingClientRect();
-    const deviceWidth = device.screen_width || 720;
-    const deviceHeight = device.screen_height || 1600;
+    const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
+    const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
 
     let clientWidth = rect.width;
     let clientHeight = rect.height;
@@ -520,15 +527,13 @@ export const DeviceViewerPage: React.FC = () => {
     const x = Math.max(0, Math.min(deviceWidth, Math.round((touchX * deviceWidth) / clientWidth)));
     const y = Math.max(0, Math.min(deviceHeight, Math.round((touchY * deviceHeight) / clientHeight)));
 
-    const width = deviceWidth;
-    const height = deviceHeight;
-    return { x, y, width, height };
+    return { x, y, width: deviceWidth, height: deviceHeight };
   };
 
-  const sendInput = (action: string, data: any) => {
+  const sendInput = (action: string, data: any = {}) => {
     if (!canControl || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const deviceWidth = device?.screen_width || 720;
-    const deviceHeight = device?.screen_height || 1600;
+    const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
+    const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
     wsRef.current.send(JSON.stringify({
       type: 'control-input',
       deviceId: activeDeviceIdRef.current || id,
@@ -542,6 +547,8 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   const lastMoveSentRef = useRef(0);
+  const pointerDownPosRef = useRef<{ x: number; y: number; clientX: number; clientY: number; time: number } | null>(null);
+  const isPointerDraggingRef = useRef(false);
 
   // Active (non-passive) wheel listener to cleanly prevent browser scroll and send instant swipes
   useEffect(() => {
@@ -553,13 +560,13 @@ export const DeviceViewerPage: React.FC = () => {
       if (!canControl) return;
 
       const now = performance.now();
-      // Debounce wheel: 1 clean flick per 350ms to prevent fighting gestures in TikTok/feeds
+      // Debounce wheel: 1 clean flick per 350ms to prevent fighting gestures in feeds
       if (now - lastWheelTimeRef.current < 350) return;
       lastWheelTimeRef.current = now;
 
       const isDown = e.deltaY > 0;
-      const deviceWidth = device?.screen_width || 720;
-      const deviceHeight = device?.screen_height || 1600;
+      const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
+      const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
       const midX = Math.round(deviceWidth / 2);
       const startY = isDown ? Math.round(deviceHeight * 0.75) : Math.round(deviceHeight * 0.25);
       const endY = isDown ? Math.round(deviceHeight * 0.20) : Math.round(deviceHeight * 0.80);
@@ -577,108 +584,136 @@ export const DeviceViewerPage: React.FC = () => {
     return () => {
       el.removeEventListener('wheel', onWheel);
     };
-  }, [canControl, device]);
+  }, [canControl, device, streamDimensions]);
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  // High-performance unified Pointer Events: handles mouse, mobile touch, and stylus with zero delay
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.cancelable) e.preventDefault();
     startAudio();
     if (!canControl) return;
+
+    // Focus overlay for physical keyboard capture
+    if (overlayRef.current) overlayRef.current.focus();
+
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    isMouseDownRef.current = true;
-    const startX = coords.x;
-    const startY = coords.y;
-    const startTime = performance.now();
-    let currentX = startX;
-    let currentY = startY;
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch (err) {}
 
-    sendInput('touch_down', { x: startX, y: startY });
-
-    const onGlobalMouseMove = (ev: MouseEvent) => {
-      if (ev.cancelable) ev.preventDefault();
-      if (!isMouseDownRef.current) return;
-      const now = performance.now();
-      // Smooth 100Hz sampling (10ms) for instant responsiveness
-      if (now - lastMoveSentRef.current < 10) return;
-      lastMoveSentRef.current = now;
-
-      const c = getDeviceCoords(ev.clientX, ev.clientY);
-      if (c) {
-        currentX = c.x;
-        currentY = c.y;
-        sendInput('touch_move', { x: c.x, y: c.y });
-      }
+    pointerDownPosRef.current = {
+      x: coords.x,
+      y: coords.y,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      time: performance.now(),
     };
-
-    const onGlobalMouseUp = (ev: MouseEvent) => {
-      if (ev.cancelable) ev.preventDefault();
-      if (!isMouseDownRef.current) return;
-      isMouseDownRef.current = false;
-      window.removeEventListener('mousemove', onGlobalMouseMove);
-      window.removeEventListener('mouseup', onGlobalMouseUp);
-
-      const c = getDeviceCoords(ev.clientX, ev.clientY);
-      const endX = c ? c.x : currentX;
-      const endY = c ? c.y : currentY;
-
-      sendInput('touch_up', { x: endX, y: endY });
-    };
-
-    window.addEventListener('mousemove', onGlobalMouseMove);
-    window.addEventListener('mouseup', onGlobalMouseUp);
+    isPointerDraggingRef.current = false;
   };
 
-  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointerDownPosRef.current || !canControl) return;
     if (e.cancelable) e.preventDefault();
-    startAudio();
-    if (!canControl || e.touches.length === 0) return;
-    const touch = e.touches[0];
-    const coords = getDeviceCoords(touch.clientX, touch.clientY);
+
+    const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    isMouseDownRef.current = true;
-    const startX = coords.x;
-    const startY = coords.y;
-    const startTime = performance.now();
-    let currentX = startX;
-    let currentY = startY;
+    const start = pointerDownPosRef.current;
+    const dist = Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY);
 
-    sendInput('touch_down', { x: startX, y: startY });
-
-    const onGlobalTouchMove = (ev: TouchEvent) => {
-      if (ev.cancelable) ev.preventDefault();
-      if (!isMouseDownRef.current || ev.touches.length === 0) return;
-      const now = performance.now();
-      if (now - lastMoveSentRef.current < 10) return;
-      lastMoveSentRef.current = now;
-
-      const t = ev.touches[0];
-      const c = getDeviceCoords(t.clientX, t.clientY);
-      if (c) {
-        currentX = c.x;
-        currentY = c.y;
-        sendInput('touch_move', { x: c.x, y: c.y });
+    if (!isPointerDraggingRef.current) {
+      if (dist >= 7) {
+        // Movement threshold exceeded: user is dragging or swiping!
+        isPointerDraggingRef.current = true;
+        sendInput('touch_down', { x: start.x, y: start.y });
+        lastMoveSentRef.current = performance.now();
       }
-    };
+    } else {
+      // Smooth 50Hz (20ms) sampling rate: prevents WebSocket buffer congestion on mobile networks
+      const now = performance.now();
+      if (now - lastMoveSentRef.current >= 20) {
+        lastMoveSentRef.current = now;
+        sendInput('touch_move', { x: coords.x, y: coords.y });
+      }
+    }
+  };
 
-    const onGlobalTouchEnd = (ev: TouchEvent) => {
-      if (ev.cancelable) ev.preventDefault();
-      if (!isMouseDownRef.current) return;
-      isMouseDownRef.current = false;
-      window.removeEventListener('touchmove', onGlobalTouchMove);
-      window.removeEventListener('touchend', onGlobalTouchEnd);
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointerDownPosRef.current || !canControl) return;
+    if (e.cancelable) e.preventDefault();
 
-      const t = ev.changedTouches[0];
-      const c = t ? getDeviceCoords(t.clientX, t.clientY) : null;
-      const endX = c ? c.x : currentX;
-      const endY = c ? c.y : currentY;
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch (err) {}
 
-      sendInput('touch_up', { x: endX, y: endY });
-    };
+    const coords = getDeviceCoords(e.clientX, e.clientY);
+    const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
 
-    window.addEventListener('touchmove', onGlobalTouchMove, { passive: false });
-    window.addEventListener('touchend', onGlobalTouchEnd, { passive: false });
+    if (isPointerDraggingRef.current) {
+      // Completed drag gesture
+      sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
+    } else {
+      // It was an instant tap! Sending atomic tap registers 100% cleanly on device without lag
+      sendInput('tap', { x: currentPos.x, y: currentPos.y });
+    }
+
+    pointerDownPosRef.current = null;
+    isPointerDraggingRef.current = false;
+  };
+
+  const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isPointerDraggingRef.current && pointerDownPosRef.current) {
+      const coords = getDeviceCoords(e.clientX, e.clientY);
+      const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
+      sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
+    }
+    pointerDownPosRef.current = null;
+    isPointerDraggingRef.current = false;
+  };
+
+  // Physical keyboard typing listener when the screen viewer overlay is focused
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!canControl) return;
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+
+    if (e.key === 'Backspace') {
+      e.preventDefault();
+      sendInput('key_event', { keyCode: 67 }); // AKEYCODE_DEL
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      sendInput('key_event', { keyCode: 66 }); // AKEYCODE_ENTER
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      sendInput('key_event', { keyCode: 61 }); // AKEYCODE_TAB
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      sendInput('key_event', { keyCode: 111 }); // AKEYCODE_ESCAPE
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      sendInput('key_event', { keyCode: 19 });
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      sendInput('key_event', { keyCode: 20 });
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      sendInput('key_event', { keyCode: 21 });
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      sendInput('key_event', { keyCode: 22 });
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      sendInput('text', { text: e.key });
+    }
+  };
+
+  const handleSendTextSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!textInput.trim() || !canControl) return;
+    sendInput('text', { text: textInput });
+    setTextInput('');
+    setShowKeyboardInput(false);
   };
 
   const toggleFullscreen = () => {
@@ -759,6 +794,20 @@ export const DeviceViewerPage: React.FC = () => {
           </button>
 
           <button
+            onClick={() => setShowKeyboardInput(!showKeyboardInput)}
+            disabled={!canControl}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+              showKeyboardInput
+                ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30'
+                : 'bg-gray-800 text-gray-300 hover:text-white border border-gray-700'
+            }`}
+            title="Type or paste text directly into remote device"
+          >
+            <Keyboard className="h-3.5 w-3.5" />
+            <span>Type Text</span>
+          </button>
+
+          <button
             onClick={() => setCanControl(!canControl)}
             disabled={!permissions?.can_control}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
@@ -781,33 +830,87 @@ export const DeviceViewerPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Screen Viewer Centerpiece */}
-      <div className="flex-1 flex flex-col items-center justify-center p-2 relative">
-        <div className="relative max-h-[75vh] aspect-[9/19.5] rounded-3xl bg-black border-4 border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center">
+      {/* Quick Text Input Prompt Bar */}
+      {showKeyboardInput && (
+        <form
+          onSubmit={handleSendTextSubmit}
+          className="flex items-center gap-2 p-3 bg-gray-900/90 border border-purple-500/40 rounded-2xl backdrop-blur shadow-xl animate-in fade-in slide-in-from-top duration-200"
+        >
+          <Keyboard className="h-4 w-4 text-purple-400 shrink-0 ml-1" />
+          <input
+            type="text"
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            placeholder="Type or paste text to inject into device (e.g. passwords, links, messages)..."
+            className="flex-1 bg-gray-950/80 border border-gray-700 focus:border-purple-500 text-white text-xs px-3 py-2 rounded-xl outline-none"
+            autoFocus
+          />
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition shadow-lg shadow-purple-600/30 active:scale-95"
+          >
+            Send
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowKeyboardInput(false)}
+            className="px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-semibold transition"
+          >
+            Close
+          </button>
+        </form>
+      )}
+
+      {/* Screen Viewer Centerpiece: Dynamic aspect ratio decided by active scrcpy stream */}
+      <div className="flex-1 flex flex-col items-center justify-center p-2 relative min-h-0">
+        <div
+          style={{
+            aspectRatio: (videoRef.current?.videoWidth && videoRef.current?.videoHeight)
+              ? `${videoRef.current.videoWidth} / ${videoRef.current.videoHeight}`
+              : (streamDimensions?.width && streamDimensions?.height)
+              ? `${streamDimensions.width} / ${streamDimensions.height}`
+              : (device?.screen_width && device?.screen_height)
+              ? `${device.screen_width} / ${device.screen_height}`
+              : '9 / 19.5',
+          }}
+          className="relative max-h-[75vh] max-w-full rounded-3xl bg-black border-4 border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center transition-all duration-300"
+        >
           {/* Hardware Accelerated ws-scrcpy Video Player */}
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted
+            onLoadedMetadata={() => {
+              if (videoRef.current?.videoWidth && videoRef.current?.videoHeight) {
+                setStreamDimensions({
+                  width: videoRef.current.videoWidth,
+                  height: videoRef.current.videoHeight,
+                });
+              }
+            }}
             className="w-full h-full object-contain pointer-events-none select-none"
           />
 
           {/* Fallback Canvas */}
           <canvas
             ref={canvasRef}
-            width={device?.screen_width || 720}
-            height={device?.screen_height || 1600}
+            width={streamDimensions?.width || device?.screen_width || 720}
+            height={streamDimensions?.height || device?.screen_height || 1600}
             className="hidden"
           />
 
-          {/* Interactive touch/click gesture overlay */}
+          {/* Interactive touch/click gesture overlay with zero-delay Pointer Events */}
           <div
             ref={overlayRef}
-            onMouseDown={handleMouseDown}
-            onTouchStart={handleTouchStart}
+            tabIndex={0}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onKeyDown={handleKeyDown}
             style={{ touchAction: 'none' }}
-            className={`absolute inset-0 z-10 select-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
+            className={`absolute inset-0 z-10 select-none outline-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
           />
 
           {/* Overlay when not connected */}
