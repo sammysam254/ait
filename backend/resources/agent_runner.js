@@ -886,7 +886,7 @@ function startStream(deviceId, targetSerial) {
         'stay_awake=true',
         'control=true',
         'audio=false',
-        'video_codec_options=low-latency:int=1',
+        'video_codec_options=i-frame-interval:int=2,low-latency:int=1',
         'downsize_on_error=true',
       ]);
 

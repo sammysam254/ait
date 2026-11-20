@@ -443,19 +443,26 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Live-edge synchronization: gentle speed-up to stay close to live
-            // Hard seek only when VERY far behind to avoid decoder black screen loops
+            // Real-time sub-50ms live-edge synchronization
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
 
-              if (drift > 1.5 && !videoRef.current.seeking) {
-                // Only hard-seek when truly >1.5s behind (e.g. tab was backgrounded)
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.05);
-              } else if (drift > 0.3) {
-                // Gently speed up 10% to catch up without decoder disruption
-                videoRef.current.playbackRate = 1.1;
-              } else if (drift < 0.05) {
+              if (!initialLiveJumpRef.current && liveEdge > 0.08) {
+                // Initial jump straight to the live edge on first frame arrival
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.03);
+                initialLiveJumpRef.current = true;
+              } else if (drift > 0.40 && !videoRef.current.seeking) {
+                // If stream accumulated >400ms lag, jump immediately to live edge
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.03);
+              } else if (drift > 0.10) {
+                // Drift between 100ms and 400ms: speed up 30% to catch up smoothly in ~250ms
+                videoRef.current.playbackRate = 1.30;
+              } else if (drift > 0.04) {
+                // Slight drift (>40ms): gentle 15% speed-up
+                videoRef.current.playbackRate = 1.15;
+              } else {
+                // Under 40ms: lock to 1.0x real-time 1:1 sync
                 videoRef.current.playbackRate = 1.0;
               }
             }
@@ -615,6 +622,10 @@ export const DeviceViewerPage: React.FC = () => {
       time: performance.now(),
     };
     isPointerDraggingRef.current = false;
+
+    // Send touch_down IMMEDIATELY on finger/mouse contact — phone responds with 0ms delay!
+    sendInput('touch_down', { x: coords.x, y: coords.y });
+    lastMoveSentRef.current = performance.now();
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -624,23 +635,11 @@ export const DeviceViewerPage: React.FC = () => {
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    const start = pointerDownPosRef.current;
-    const dist = Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY);
-
-    if (!isPointerDraggingRef.current) {
-      if (dist >= 7) {
-        // Movement threshold exceeded: user is dragging or swiping!
-        isPointerDraggingRef.current = true;
-        sendInput('touch_down', { x: start.x, y: start.y });
-        lastMoveSentRef.current = performance.now();
-      }
-    } else {
-      // Smooth 50Hz (20ms) sampling rate: prevents WebSocket buffer congestion on mobile networks
-      const now = performance.now();
-      if (now - lastMoveSentRef.current >= 20) {
-        lastMoveSentRef.current = now;
-        sendInput('touch_move', { x: coords.x, y: coords.y });
-      }
+    // 60Hz (16ms) smooth gesture tracking: lockstep drag and swipe without flooding WS
+    const now = performance.now();
+    if (now - lastMoveSentRef.current >= 16) {
+      lastMoveSentRef.current = now;
+      sendInput('touch_move', { x: coords.x, y: coords.y });
     }
   };
 
@@ -655,20 +654,15 @@ export const DeviceViewerPage: React.FC = () => {
     const coords = getDeviceCoords(e.clientX, e.clientY);
     const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
 
-    if (isPointerDraggingRef.current) {
-      // Completed drag gesture
-      sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
-    } else {
-      // It was an instant tap! Sending atomic tap registers 100% cleanly on device without lag
-      sendInput('tap', { x: currentPos.x, y: currentPos.y });
-    }
+    // Send touch_up immediately to finalize click or gesture on physical device
+    sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
 
     pointerDownPosRef.current = null;
     isPointerDraggingRef.current = false;
   };
 
   const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (isPointerDraggingRef.current && pointerDownPosRef.current) {
+    if (pointerDownPosRef.current && canControl) {
       const coords = getDeviceCoords(e.clientX, e.clientY);
       const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
       sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
