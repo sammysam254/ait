@@ -197,17 +197,31 @@ export class AssignmentService {
 
     // Verify user is registered/invited in this organization
     const au = Array.from(inMemoryDb.assignedUsers.values()).find(
-      u => u.organization_id === organizationId && (u.user_id === assignedUserId || u.email.toLowerCase() === assignedUserId.toLowerCase())
+      u => u.organization_id === organizationId && (
+        u.user_id === assignedUserId ||
+        u.email.toLowerCase() === assignedUserId.toLowerCase() ||
+        u.id === assignedUserId
+      )
     );
     if (!au) {
       return { success: false, error: 'Target user is not registered in this organization.' };
     }
 
-    const targetUserId = au.user_id;
+    // Anchor to registered profile ID if user is already signed up
+    const profile = Array.from(inMemoryDb.profiles.values()).find(p => p.email.toLowerCase() === au.email.toLowerCase());
+    const targetUserId = profile ? profile.id : au.user_id;
+    if (profile && au.user_id !== profile.id) {
+      au.user_id = profile.id;
+    }
 
     // Check existing assignment
     let assignment = Array.from(inMemoryDb.deviceAssignments.values()).find(
-      da => da.device_id === deviceId && (da.assigned_user_id === targetUserId || da.assigned_user_id === au.email.toLowerCase())
+      da => da.device_id === deviceId && (
+        da.assigned_user_id === targetUserId ||
+        da.assigned_user_id === au.user_id ||
+        da.assigned_user_id.toLowerCase() === au.email.toLowerCase() ||
+        da.assigned_user_id === au.id
+      )
     );
 
     if (assignment) {
@@ -251,11 +265,21 @@ export class AssignmentService {
    * Revoke single device assignment from a user
    */
   static revokeDeviceAssignment(organizationId: string, deviceId: string, assignedUserId: string, revokedByUserId: string): boolean {
+    const au = Array.from(inMemoryDb.assignedUsers.values()).find(
+      u => u.organization_id === organizationId && (u.id === assignedUserId || u.user_id === assignedUserId || u.email.toLowerCase() === assignedUserId.toLowerCase())
+    );
+    const targetIds = new Set<string>([assignedUserId.toLowerCase()]);
+    if (au) {
+      if (au.id) targetIds.add(au.id.toLowerCase());
+      if (au.user_id) targetIds.add(au.user_id.toLowerCase());
+      if (au.email) targetIds.add(au.email.toLowerCase());
+    }
+
     let targetKey: string | null = null;
     for (const [key, da] of inMemoryDb.deviceAssignments.entries()) {
       if (da.device_id === deviceId &&
-          (da.assigned_user_id === assignedUserId || da.assigned_user_id.toLowerCase() === assignedUserId.toLowerCase()) &&
-          da.organization_id === organizationId) {
+          da.organization_id === organizationId &&
+          targetIds.has(da.assigned_user_id.toLowerCase())) {
         targetKey = key;
         break;
       }
@@ -301,7 +325,9 @@ export class AssignmentService {
     // Delete all device assignments for this user
     for (const [key, da] of inMemoryDb.deviceAssignments.entries()) {
       if (da.organization_id === organizationId &&
-          (da.assigned_user_id === targetUser.user_id || da.assigned_user_id === targetUser.email.toLowerCase())) {
+          (da.assigned_user_id === targetUser.user_id ||
+           da.assigned_user_id.toLowerCase() === targetUser.email.toLowerCase() ||
+           da.assigned_user_id === targetUser.id)) {
         inMemoryDb.deviceAssignments.delete(key);
       }
     }

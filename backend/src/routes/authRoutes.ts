@@ -55,13 +55,24 @@ router.post('/login', (req: Request, res: Response) => {
   // Find their organization
   let organizationId = '';
 
-  // 1. Check if assigned subordinate worker
-  if (profile.system_role === 'assigned_user') {
-    const assignedUser = Array.from(inMemoryDb.assignedUsers.values()).find(
-      au => (au.user_id === profile!.id || au.email.toLowerCase() === cleanEmail) && au.status === 'active'
-    );
-    if (assignedUser) {
-      organizationId = assignedUser.organization_id;
+  // 1. Check if assigned subordinate worker or pre-invited
+  const assignedUser = Array.from(inMemoryDb.assignedUsers.values()).find(
+    au => (au.user_id === profile!.id || au.email.toLowerCase() === cleanEmail || (au.id && au.id === profile!.id))
+  );
+
+  if (assignedUser) {
+    assignedUser.status = 'active';
+    assignedUser.user_id = profile.id;
+    organizationId = assignedUser.organization_id;
+    if (profile.system_role !== 'admin' && profile.system_role !== 'customer') {
+      profile.system_role = 'assigned_user';
+    }
+    // Relink device assignments to profile.id
+    for (const da of inMemoryDb.deviceAssignments.values()) {
+      if (da.organization_id === assignedUser.organization_id &&
+         (da.assigned_user_id.toLowerCase() === cleanEmail || da.assigned_user_id === assignedUser.id)) {
+        da.assigned_user_id = profile.id;
+      }
     }
   }
 
@@ -80,6 +91,8 @@ router.post('/login', (req: Request, res: Response) => {
     for (const au of inMemoryDb.assignedUsers.values()) {
       if (au.user_id === profile.id || au.email.toLowerCase() === cleanEmail) {
         organizationId = au.organization_id;
+        au.status = 'active';
+        au.user_id = profile.id;
         profile.system_role = 'assigned_user';
         break;
       }
@@ -173,6 +186,9 @@ router.post('/register', (req: Request, res: Response) => {
       au => au.organization_id === invite.organization_id && (au.email.toLowerCase() === cleanEmail || au.user_id === userId)
     );
 
+    const oldUserId = assignedUser ? assignedUser.user_id : null;
+    const oldAuId = assignedUser ? assignedUser.id : null;
+
     if (assignedUser) {
       assignedUser.user_id = userId;
       assignedUser.status = 'active';
@@ -189,10 +205,13 @@ router.post('/register', (req: Request, res: Response) => {
       inMemoryDb.assignedUsers.set(assignedUser.id, assignedUser);
     }
 
-    // Relink any device assignments that were keyed by email to the new userId
+    // Relink any device assignments that were keyed by email, oldUserId, or au.id to the new userId
     for (const da of inMemoryDb.deviceAssignments.values()) {
       if (da.organization_id === invite.organization_id &&
-         (da.assigned_user_id === cleanEmail || da.assigned_user_id === assignedUser.user_id)) {
+         (da.assigned_user_id.toLowerCase() === cleanEmail ||
+          (oldUserId && da.assigned_user_id === oldUserId) ||
+          (oldAuId && da.assigned_user_id === oldAuId) ||
+          da.assigned_user_id === assignedUser.id)) {
         da.assigned_user_id = userId;
       }
     }
@@ -226,11 +245,88 @@ router.post('/register', (req: Request, res: Response) => {
   }
 
   // =========================================================================
-  // STANDARD CUSTOMER REGISTRATION FLOW
+  // STANDARD CUSTOMER / AUTO-DETECTED INVITATION REGISTRATION FLOW
   // =========================================================================
   const existing = Array.from(inMemoryDb.profiles.values()).find(
     p => p.email.toLowerCase() === cleanEmail
   );
+
+  // Check if an invitation or assignment exists for this email
+  const preAssigned = Array.from(inMemoryDb.assignedUsers.values()).find(
+    au => au.email.toLowerCase() === cleanEmail
+  );
+  const pendingInvite = Array.from(inMemoryDb.invitations.values()).find(
+    inv => inv.email.toLowerCase() === cleanEmail && inv.status === 'pending'
+  );
+
+  if (preAssigned || pendingInvite) {
+    const orgId = preAssigned ? preAssigned.organization_id : pendingInvite!.organization_id;
+    const userId = existing ? existing.id : uuidv4();
+    const oldUserId = preAssigned ? preAssigned.user_id : null;
+    const oldAuId = preAssigned ? preAssigned.id : null;
+
+    let profile = existing;
+    if (!profile) {
+      profile = {
+        id: userId,
+        email: cleanEmail,
+        full_name: fullName || (pendingInvite ? pendingInvite.full_name : '') || cleanEmail.split('@')[0],
+        system_role: 'assigned_user',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      inMemoryDb.profiles.set(userId, profile);
+    } else {
+      profile.system_role = 'assigned_user';
+      if (fullName) profile.full_name = fullName;
+      profile.updated_at = new Date().toISOString();
+    }
+
+    if (preAssigned) {
+      preAssigned.user_id = userId;
+      preAssigned.status = 'active';
+    }
+    if (pendingInvite) {
+      pendingInvite.status = 'accepted';
+    }
+
+    // Relink any device assignments
+    for (const da of inMemoryDb.deviceAssignments.values()) {
+      if (da.organization_id === orgId &&
+         (da.assigned_user_id.toLowerCase() === cleanEmail ||
+          (oldUserId && da.assigned_user_id === oldUserId) ||
+          (oldAuId && da.assigned_user_id === oldAuId) ||
+          (preAssigned && da.assigned_user_id === preAssigned.id))) {
+        da.assigned_user_id = userId;
+      }
+    }
+
+    const org = inMemoryDb.organizations.get(orgId);
+    const token = jwt.sign(
+      {
+        id: profile.id,
+        email: profile.email,
+        system_role: 'assigned_user',
+        organizationId: orgId,
+      },
+      config.jwtSecret,
+      { expiresIn: '7d' }
+    );
+
+    return res.status(201).json({
+      token,
+      user: {
+        id: profile.id,
+        email: profile.email,
+        fullName: profile.full_name,
+        role: 'assigned_user',
+        organizationId: orgId,
+        organizationName: org?.name || 'Cloud Device Farm',
+        plan: org?.plan || 'starter',
+      },
+      message: 'Worker account created successfully and routed to assigned team.',
+    });
+  }
 
   if (existing) {
     return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });

@@ -6,6 +6,45 @@ const VERTEX_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
 export class DeviceService {
   /**
+   * Helper to collect all string identifiers associated with an authenticated user:
+   * user.id, user.email, and all associated AssignedUser records (id, user_id, email).
+   */
+  private static getUserIdentifierSet(user: AuthenticatedUser): Set<string> {
+    const ids = new Set<string>();
+    if (user.id) ids.add(user.id.toLowerCase().trim());
+    if (user.email) ids.add(user.email.toLowerCase().trim());
+
+    const cleanEmail = (user.email || '').toLowerCase().trim();
+    const cleanId = (user.id || '').toLowerCase().trim();
+
+    for (const au of inMemoryDb.assignedUsers.values()) {
+      const match =
+        (cleanId && au.user_id && au.user_id.toLowerCase().trim() === cleanId) ||
+        (cleanEmail && au.email && au.email.toLowerCase().trim() === cleanEmail) ||
+        (cleanId && au.id && au.id.toLowerCase().trim() === cleanId);
+
+      if (match) {
+        if (au.id) ids.add(au.id.toLowerCase().trim());
+        if (au.user_id) ids.add(au.user_id.toLowerCase().trim());
+        if (au.email) ids.add(au.email.toLowerCase().trim());
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Helper to find all active device assignments for a user.
+   */
+  private static getUserAssignments(user: AuthenticatedUser) {
+    const userIdentifiers = this.getUserIdentifierSet(user);
+    return Array.from(inMemoryDb.deviceAssignments.values()).filter(da => {
+      if (!da.can_view) return false;
+      const target = (da.assigned_user_id || '').toLowerCase().trim();
+      return userIdentifiers.has(target);
+    });
+  }
+
+  /**
    * Retrieves devices accessible by the authenticated user.
    * Enforces strict multi-tenant isolation and assigned-user boundaries.
    */
@@ -13,42 +52,53 @@ export class DeviceService {
     const allDevices = Array.from(inMemoryDb.devices.values());
 
     if (user.system_role === 'admin') {
-      return allDevices;
+      return allDevices.map(d => ({
+        ...d,
+        permissions: { can_view: true, can_control: true, can_share: true }
+      }));
     }
 
+    const userAssignments = this.getUserAssignments(user);
+    const assignedMap = new Map<string, any>();
+    for (const a of userAssignments) {
+      assignedMap.set(a.device_id, a);
+    }
+
+    // Devices explicitly assigned to this user
+    const assignedDevices = allDevices
+      .filter(d => assignedMap.has(d.id))
+      .map(d => {
+        const assignment = assignedMap.get(d.id)!;
+        return {
+          ...d,
+          permissions: {
+            can_view: assignment.can_view ?? true,
+            can_control: assignment.can_control ?? false,
+            can_share: assignment.can_share ?? false,
+          }
+        };
+      });
+
     if (user.system_role === 'customer') {
-      // Return only devices belonging to this customer's organization
-      return allDevices
+      // Return devices belonging to this customer's organization + any devices assigned to them
+      const ownedDevices = allDevices
         .filter(d => d.organization_id === user.organizationId)
         .map(d => ({
           ...d,
           permissions: { can_view: true, can_control: true, can_share: true }
         }));
+
+      // Combine owned and assigned (deduplicated by id)
+      const resultMap = new Map<string, any>();
+      for (const d of ownedDevices) resultMap.set(d.id, d);
+      for (const d of assignedDevices) {
+        if (!resultMap.has(d.id)) resultMap.set(d.id, d);
+      }
+      return Array.from(resultMap.values());
     }
 
-    if (user.system_role === 'assigned_user') {
-      // Subordinate account: can ONLY see devices explicitly assigned to them
-      const userAssignments = Array.from(inMemoryDb.deviceAssignments.values())
-        .filter(da => da.assigned_user_id === user.id && da.can_view);
-
-      const assignedDeviceIds = new Set(userAssignments.map(a => a.device_id));
-
-      return allDevices
-        .filter(d => assignedDeviceIds.has(d.id))
-        .map(d => {
-          const assignment = userAssignments.find(a => a.device_id === d.id);
-          return {
-            ...d,
-            permissions: {
-              can_view: assignment?.can_view ?? true,
-              can_control: assignment?.can_control ?? false,
-              can_share: assignment?.can_share ?? false,
-            }
-          };
-        });
-    }
-
-    return [];
+    // Subordinate account / worker: can see all devices explicitly assigned to them
+    return assignedDevices;
   }
 
   /**
@@ -83,6 +133,21 @@ export class DeviceService {
       return { status: 200, device, permissions: { can_view: true, can_control: true, can_share: true } };
     }
 
+    // Check if device is explicitly assigned to this user
+    const userAssignments = this.getUserAssignments(user);
+    const assignment = userAssignments.find(a => a.device_id === device!.id && a.can_view);
+    if (assignment) {
+      return {
+        status: 200,
+        device,
+        permissions: {
+          can_view: assignment.can_view ?? true,
+          can_control: assignment.can_control ?? false,
+          can_share: assignment.can_share ?? false,
+        }
+      };
+    }
+
     // Customer owner check: must belong to the exact same organization
     if (user.system_role === 'customer') {
       if (device.organization_id !== user.organizationId) {
@@ -92,26 +157,7 @@ export class DeviceService {
       return { status: 200, device, permissions: { can_view: true, can_control: true, can_share: true } };
     }
 
-    // Assigned user check: must have explicit assignment record
-    if (user.system_role === 'assigned_user') {
-      const assignment = Array.from(inMemoryDb.deviceAssignments.values()).find(
-        a => a.device_id === deviceId && a.assigned_user_id === user.id && a.can_view
-      );
-      if (!assignment) {
-        return { status: 403, error: 'Access denied. Device is not assigned to your account.' };
-      }
-      return {
-        status: 200,
-        device,
-        permissions: {
-          can_view: assignment.can_view,
-          can_control: assignment.can_control,
-          can_share: assignment.can_share,
-        }
-      };
-    }
-
-    return { status: 403, error: 'Unauthorized.' };
+    return { status: 403, error: 'Access denied. Device is not assigned to your account.' };
   }
 
   /**

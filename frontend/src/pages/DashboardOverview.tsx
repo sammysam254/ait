@@ -63,7 +63,7 @@ export const DashboardOverview: React.FC = () => {
           <p className="text-sm md:text-base text-gray-300">
             Remotely manage, view, share, and assign your Android phone fleet with low-latency H.264 streaming.
           </p>
-          {(user?.role === 'customer' || user?.role === 'admin') && (
+          {(user?.role === 'customer' || user?.role === 'admin') ? (
             <div className="pt-2 flex flex-wrap gap-3">
               <a
                 href={ApiService.getDownloadScriptUrl()}
@@ -78,6 +78,17 @@ export const DashboardOverview: React.FC = () => {
               >
                 <span>View Device Fleet</span>
                 <ArrowUpRight className="h-4 w-4 text-gray-400" />
+              </Link>
+            </div>
+          ) : (
+            <div className="pt-2 flex flex-wrap gap-3">
+              <Link
+                to="/devices"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-sm shadow-lg shadow-indigo-600/30 transition transform active:scale-95"
+              >
+                <Smartphone className="h-4 w-4" />
+                <span>View Assigned Devices</span>
+                <ArrowUpRight className="h-4 w-4 text-white/80" />
               </Link>
             </div>
           )}
@@ -153,9 +164,13 @@ export const DashboardOverview: React.FC = () => {
         {devices.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-gray-800 p-8 text-center space-y-3">
             <Smartphone className="h-10 w-10 text-gray-600 mx-auto" />
-            <h3 className="text-base font-semibold text-gray-300">No Android devices connected yet</h3>
+            <h3 className="text-base font-semibold text-gray-300">
+              {user?.role === 'assigned_user' ? 'No devices assigned to your account yet' : 'No Android devices connected yet'}
+            </h3>
             <p className="text-xs text-gray-500 max-w-sm mx-auto">
-              Run your personalized setup.bat on your Windows PC and connect your phone with USB debugging enabled.
+              {user?.role === 'assigned_user'
+                ? 'Your team account owner has not assigned any active devices to you. Once assigned, they will appear here automatically.'
+                : 'Run your personalized setup.bat on your Windows PC and connect your phone with USB debugging enabled.'}
             </p>
             {user?.role === 'customer' && (
               <a
