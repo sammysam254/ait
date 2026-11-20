@@ -26,16 +26,24 @@ lockServer.once('error', (err) => {
 });
 lockServer.listen(LOCK_PORT, '127.0.0.1');
 
-// Global WebSocket fallback for older Node versions
-let WsClient = globalThis.WebSocket;
-if (!WsClient) {
+// Prefer high-performance native ws engine with true RFC 6455 transport pings
+let WsClient = null;
+const candidateWsPaths = [
+  'ws',
+  path.join(__dirname, 'node_modules', 'ws'),
+  path.join(process.cwd(), 'node_modules', 'ws'),
+  'C:\\Users\\sammy\\AppData\\Local\\VertexSaaS\\Agent\\node_modules\\ws',
+  'C:\\Users\\sammy\\OneDrive\\Desktop\\vertext saas\\windows-agent\\node_modules\\ws',
+  'C:\\Users\\sammy\\OneDrive\\Desktop\\vertext saas\\backend\\node_modules\\ws',
+];
+for (const p of candidateWsPaths) {
   try {
-    WsClient = require('ws');
-  } catch (e) {
-    try {
-      WsClient = require(path.join(__dirname, 'node_modules', 'ws'));
-    } catch (e2) {}
-  }
+    WsClient = require(p);
+    if (WsClient) break;
+  } catch (e) {}
+}
+if (!WsClient) {
+  WsClient = globalThis.WebSocket;
 }
 
 console.log('===============================================================================');
@@ -605,6 +613,21 @@ let activeStreams = new Map();     // serial -> { stop, serial }
 let cachedKeyframes = new Map();   // serial -> Buffer
 let ws = null;
 let isReconnecting = false;
+let lastActivityTime = Date.now();
+let pingInterval = null;
+let watchdogTimer = null;
+let reconnectTimer = null;
+
+function scheduleReconnect() {
+  if (isReconnecting) return;
+  isReconnecting = true;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  console.log('[StreamBridge] ⚡ Immediate auto-recovery initiated. Reconnecting in 1.5s...');
+  reconnectTimer = setTimeout(() => {
+    isReconnecting = false;
+    connectWebSocket();
+  }, 1500);
+}
 
 function connectWebSocket() {
   if (!config.agentAuthToken) {
@@ -618,16 +641,20 @@ function connectWebSocket() {
 
   console.log(`[StreamBridge] Connecting to Cloud Signaling: ${wsProto}//${host}/ws...`);
 
-  let pingInterval = null;
+  if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
 
   try {
-    ws = new WsClient(wsUrl);
+    ws = new WsClient(wsUrl, { perMessageDeflate: false });
+
+    lastActivityTime = Date.now();
 
     ws.onopen = () => {
       console.log('[StreamBridge] 🟢 Connected to Cloud Signaling Gateway successfully.');
       isReconnecting = false;
+      lastActivityTime = Date.now();
 
-      // Active heartbeat ping every 15s to keep Cloudflare / Nginx tunnels permanently alive
+      // Active bidirectional RFC 6455 transport ping every 10s: keeps Cloudflare and Nginx reverse proxies permanently alive
       if (pingInterval) clearInterval(pingInterval);
       pingInterval = setInterval(() => {
         if (ws && ws.readyState === 1) {
@@ -639,9 +666,18 @@ function connectWebSocket() {
             }
           } catch (e) {}
         }
-      }, 15000);
+      }, 10000);
 
-      // Re-register each physical phone exactly once with its active cloud device ID
+      // Connection watchdog: if no activity / pong in 30s, force instant clean reconnect
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      watchdogTimer = setInterval(() => {
+        if (ws && ws.readyState === 1 && Date.now() - lastActivityTime > 30000) {
+          console.warn('[StreamBridge] ⚠️ Keepalive watchdog timeout (no activity in 30s). Re-syncing stream...');
+          try { ws.terminate ? ws.terminate() : ws.close(); } catch (e) {}
+        }
+      }, 5000);
+
+      // Re-register each physical phone and push keyframes immediately for instant viewer recovery (< 1s)
       const registeredSerials = new Set();
       for (const [devId, ser] of registeredDevices.entries()) {
         if (registeredSerials.has(ser)) continue;
@@ -649,10 +685,29 @@ function connectWebSocket() {
         const activeDevId = serialToActiveDeviceId.get(ser) || devId;
         console.log(`[StreamBridge] Registering active device producer: ${activeDevId} (${ser})`);
         ws.send(JSON.stringify({ type: 'agent-register-device', deviceId: activeDevId, serial: ser }));
+
+        // Force scrcpy to produce an immediate fresh IDR keyframe
+        const ctrl = controlSockets.get(ser);
+        if (ctrl && !ctrl.destroyed) {
+          try { ctrl.write(Buffer.from([17])); } catch (e) {}
+        }
+        const cached = cachedKeyframes.get(ser);
+        if (cached && ws.readyState === 1) {
+          try { ws.send(Buffer.concat([getTargetDevIdBuf(activeDevId), cached])); } catch (e) {}
+        }
       }
     };
 
+    if (typeof ws.on === 'function') {
+      ws.on('pong', () => { lastActivityTime = Date.now(); });
+      ws.on('ping', () => {
+        lastActivityTime = Date.now();
+        try { ws.pong(); } catch (e) {}
+      });
+    }
+
     ws.onmessage = async (event) => {
+      lastActivityTime = Date.now();
       try {
         const text = typeof event.data === 'string' ? event.data : event.data.toString();
         const msg = JSON.parse(text);
@@ -664,27 +719,18 @@ function connectWebSocket() {
 
     ws.onclose = (e) => {
       if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
-      console.warn(`[StreamBridge] 🟡 WebSocket disconnected (code: ${e.code || 'closed'}). Reconnecting in 3s...`);
-      // DO NOT stop scrcpy streams on WS disconnect — keep video pipeline alive for seamless viewer reconnects
+      if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+      console.warn(`[StreamBridge] 🟡 WebSocket disconnected (code: ${e.code || 'closed'}). Reconnecting in 1.5s...`);
       scheduleReconnect();
     };
 
     ws.onerror = (e) => {
-      if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
       console.warn('[StreamBridge] 🔴 WebSocket error:', e.message || 'connection failed');
     };
   } catch (err) {
     console.error('[StreamBridge] Connection error:', err.message);
     scheduleReconnect();
   }
-}
-
-function scheduleReconnect() {
-  if (isReconnecting) return;
-  isReconnecting = true;
-  setTimeout(() => {
-    connectWebSocket();
-  }, 3000);
 }
 
 async function handleMessage(msg) {
@@ -734,6 +780,19 @@ async function handleMessage(msg) {
     case 'idle-stream': {
       const { deviceId } = msg;
       console.log(`[StreamBridge] ⏸️ Received idle-stream request for device: ${deviceId}`);
+      break;
+    }
+
+    case 'ping': {
+      lastActivityTime = Date.now();
+      if (ws && ws.readyState === 1) {
+        try { ws.send(JSON.stringify({ type: 'pong' })); } catch (e) {}
+      }
+      break;
+    }
+
+    case 'pong': {
+      lastActivityTime = Date.now();
       break;
     }
 

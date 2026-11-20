@@ -23,7 +23,13 @@ export class SignalingServer {
   private connectedAgents: Set<ClientSession> = new Set();
 
   constructor(server: HttpServer) {
-    this.wss = new WebSocketServer({ server, path: '/ws' });
+    this.wss = new WebSocketServer({
+      server,
+      path: '/ws',
+      perMessageDeflate: false, // Critical: disables CPU-heavy zlib compression on pre-compressed H.264 streams
+      maxPayload: 100 * 1024 * 1024,
+      clientTracking: true,
+    });
     this.initialize();
   }
 
@@ -164,7 +170,7 @@ export class SignalingServer {
           }
         }
       }
-    }, 20000);
+    }, 10000);
   }
 
   private getRoom(deviceId: string) {
@@ -270,19 +276,24 @@ export class SignalingServer {
             session.ws.send(JSON.stringify({ type: 'registered', deviceId, success: true }));
             console.log(`[SignalingServer] Agent registered producer for device ${deviceId} (serial: ${msg.serial || 'unknown'})`);
 
-            // If viewers are already in the room, immediately initiate the stream
+            // If viewers are already in the room, immediately initiate the stream and broadcast fresh keyframe
             if (room.viewers.size > 0) {
               const dev = inMemoryDb.devices.get(deviceId);
               const serial = dev ? dev.adb_serial : (msg.serial || '');
               session.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
               DeviceService.updateStatus(deviceId, 'streaming');
               for (const viewer of room.viewers) {
-                viewer.ws.send(JSON.stringify({
-                  type: 'connection-established',
-                  deviceId,
-                  agentOnline: true,
-                  canControl: viewer.canControl,
-                }));
+                if (viewer.ws.readyState === WebSocket.OPEN) {
+                  if (room.lastHeader) {
+                    try { viewer.ws.send(room.lastHeader); } catch (e) {}
+                  }
+                  viewer.ws.send(JSON.stringify({
+                    type: 'connection-established',
+                    deviceId,
+                    agentOnline: true,
+                    canControl: viewer.canControl,
+                  }));
+                }
               }
             }
             break;

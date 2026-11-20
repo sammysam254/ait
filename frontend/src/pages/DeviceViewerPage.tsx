@@ -443,9 +443,13 @@ export const DeviceViewerPage: React.FC = () => {
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === 'connection-established') {
+            setStatus('connected');
             if (msg.canControl !== undefined) setCanControl(msg.canControl);
             const reqId = activeDeviceIdRef.current || id;
-            ws.send(JSON.stringify({ type: 'request-stream', deviceId: reqId }));
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: reqId }));
+              wsRef.current.send(JSON.stringify({ type: 'request-stream', deviceId: reqId }));
+            }
           } else if (msg.type === 'device-dimensions') {
             if (msg.width && msg.height) {
               setStreamDimensions({ width: msg.width, height: msg.height });
@@ -464,6 +468,7 @@ export const DeviceViewerPage: React.FC = () => {
         } catch (e) {}
       } else if (event.data instanceof ArrayBuffer) {
         let bytes = new Uint8Array(event.data);
+        setStatus((prev) => (prev !== 'connected' ? 'connected' : prev));
 
         // Strip 36-byte UUID prefix if forwarded with routing envelope
         if (bytes.length > 36 && bytes[8] === 0x2d && bytes[13] === 0x2d && bytes[18] === 0x2d && bytes[23] === 0x2d) {

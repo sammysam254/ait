@@ -62,6 +62,10 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
 // Create HTTP server
 const server = http.createServer(app);
 
+// Keep-alive timeouts configured to prevent Cloudflare/Nginx from abruptly dropping idle or keep-alive sockets
+server.keepAliveTimeout = 120000;
+server.headersTimeout = 125000;
+
 // Attach WebSocket Signaling Server for WebRTC / Streaming Bridge
 const signalingServer = new SignalingServer(server);
 
