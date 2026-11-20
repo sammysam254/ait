@@ -1,20 +1,13 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   Smartphone,
   Shield,
-  KeyRound,
   Lock,
-  ArrowLeft,
-  Circle,
-  Square,
-  RotateCw,
-  Sliders,
   AlertTriangle,
-  Radio,
-  CheckCircle2,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
+import { DeviceViewerPage } from './DeviceViewerPage';
 
 export const PublicShareViewPage: React.FC = () => {
   const { token } = useParams<{ token: string }>();
@@ -34,10 +27,6 @@ export const PublicShareViewPage: React.FC = () => {
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [canControl, setCanControl] = useState(false);
-  const [streamStatus, setStreamStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting');
-
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     if (token) {
@@ -82,7 +71,6 @@ export const PublicShareViewPage: React.FC = () => {
         setSessionToken(res.sessionToken);
         setDeviceId(res.deviceId);
         setCanControl(res.allowControl);
-        connectViewerStream(res.sessionToken, res.deviceId);
       } else {
         setPinError(res.error || 'Incorrect PIN.');
       }
@@ -91,63 +79,6 @@ export const PublicShareViewPage: React.FC = () => {
     } finally {
       setPinVerifying(false);
     }
-  };
-
-  const connectViewerStream = (sToken: string, devId: string) => {
-    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
-    const wsUrl = `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(sToken)}&deviceId=${devId}`;
-
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = () => {
-      setStreamStatus('connected');
-    };
-
-    ws.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        const blob = new Blob([event.data], { type: 'image/jpeg' });
-        const img = new Image();
-        img.onload = () => {
-          const canvas = canvasRef.current;
-          if (canvas) {
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            }
-          }
-          URL.revokeObjectURL(img.src);
-        };
-        img.src = URL.createObjectURL(blob);
-      }
-    };
-
-    ws.onclose = () => {
-      setStreamStatus('offline');
-    };
-  };
-
-  const sendInput = (action: string, data: any) => {
-    if (!canControl || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'control-input',
-      action,
-      data,
-    }));
-  };
-
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!canControl) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 1080;
-    const y = ((e.clientY - rect.top) / rect.height) * 2400;
-
-    sendInput('tap', { x, y });
   };
 
   // 1. Loading State
@@ -181,7 +112,7 @@ export const PublicShareViewPage: React.FC = () => {
   }
 
   // 3. PIN Verification Screen (Prior to streaming)
-  if (!sessionToken) {
+  if (!sessionToken || !deviceId) {
     return (
       <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center p-4">
         <div className="max-w-md w-full rounded-3xl bg-gray-900 border border-gray-800 p-8 space-y-6 shadow-2xl">
@@ -235,65 +166,15 @@ export const PublicShareViewPage: React.FC = () => {
     );
   }
 
-  // 4. Authenticated Live Stream Viewer
+  // 4. Authenticated Live Stream Viewer using full DeviceViewer engine (H.264 + Scrcpy Control)
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col items-center justify-center p-4 space-y-4">
-      {/* Stream Header */}
-      <div className="w-full max-w-sm flex items-center justify-between px-4 py-2 bg-gray-900 border border-gray-800 rounded-2xl text-xs">
-        <div className="flex items-center gap-2">
-          <Smartphone className="h-4 w-4 text-indigo-400" />
-          <span className="font-bold text-gray-200">{shareInfo?.deviceName || 'Android'}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Radio className="h-3 w-3 text-emerald-400 animate-pulse" />
-          <span className="text-[11px] text-emerald-400 font-semibold">{canControl ? 'Remote Control' : 'View Only'}</span>
-        </div>
-      </div>
-
-      {/* Screen Canvas */}
-      <div className="relative w-full max-w-xs aspect-[9/19.5] rounded-3xl bg-black border-4 border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center">
-        <canvas
-          ref={canvasRef}
-          width={1080}
-          height={2400}
-          onClick={handleCanvasClick}
-          className={`w-full h-full object-contain ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
-        />
-
-        {streamStatus !== 'connected' && (
-          <div className="absolute inset-0 bg-gray-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center space-y-2">
-            <Smartphone className="h-8 w-8 text-gray-600 animate-pulse" />
-            <span className="text-xs text-gray-300 font-medium">Connecting to live screen...</span>
-          </div>
-        )}
-      </div>
-
-      {/* Navigation Buttons */}
-      {canControl && (
-        <div className="flex items-center justify-center gap-6 px-6 py-2 rounded-full bg-gray-900/90 border border-gray-800 shadow-xl">
-          <button
-            onClick={() => sendInput('back', {})}
-            className="p-2 rounded-full hover:bg-gray-800 text-gray-300 hover:text-white transition active:scale-95"
-            title="Back"
-          >
-            <ArrowLeft className="h-5 w-5" />
-          </button>
-          <button
-            onClick={() => sendInput('home', {})}
-            className="p-2 rounded-full hover:bg-gray-800 text-gray-300 hover:text-white transition active:scale-95"
-            title="Home"
-          >
-            <Circle className="h-5 w-5" />
-          </button>
-          <button
-            onClick={() => sendInput('recents', {})}
-            className="p-2 rounded-full hover:bg-gray-800 text-gray-300 hover:text-white transition active:scale-95"
-            title="Recent Apps"
-          >
-            <Square className="h-4 w-4" />
-          </button>
-        </div>
-      )}
-    </div>
+    <DeviceViewerPage
+      shareSessionToken={sessionToken}
+      shareDeviceId={deviceId}
+      shareAllowControl={canControl}
+      shareDeviceName={shareInfo?.deviceName}
+    />
   );
 };
+
+export default PublicShareViewPage;

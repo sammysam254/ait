@@ -30,7 +30,20 @@ import {
 import { ApiService } from '../services/api';
 import { Device } from '../types';
 
-export const DeviceViewerPage: React.FC = () => {
+export interface DeviceViewerPageProps {
+  shareSessionToken?: string;
+  shareDeviceId?: string;
+  shareAllowControl?: boolean;
+  shareDeviceName?: string;
+}
+
+export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
+  shareSessionToken,
+  shareDeviceId,
+  shareAllowControl,
+  shareDeviceName,
+}) => {
+  const isPublicShare = !!shareSessionToken && !!shareDeviceId;
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -303,7 +316,32 @@ export const DeviceViewerPage: React.FC = () => {
 
   useEffect(() => {
     isMountedRef.current = true;
-    if (id) {
+    if (isPublicShare) {
+      activeDeviceIdRef.current = shareDeviceId!;
+      setDevice({
+        id: shareDeviceId!,
+        device_name: shareDeviceName || 'Android Device',
+        model: 'Android Phone',
+        manufacturer: 'Remote',
+        android_version: '14',
+        sdk_version: 34,
+        status: 'online',
+        organization_id: '',
+        agent_id: '',
+        adb_serial: shareDeviceId!,
+        screen_width: 720,
+        screen_height: 1600,
+        screen_density: 300,
+        connection_type: 'usb',
+        last_seen: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      });
+      setCanControl(shareAllowControl ?? true);
+      const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
+      const wsUrl = `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(shareSessionToken!)}&deviceId=${shareDeviceId}`;
+      connectStream(wsUrl, shareSessionToken!);
+    } else if (id) {
       activeDeviceIdRef.current = id;
       loadDevice();
     }
@@ -339,7 +377,7 @@ export const DeviceViewerPage: React.FC = () => {
         audioCtxRef.current = null;
       }
     };
-  }, [id]);
+  }, [id, shareSessionToken, shareDeviceId]);
 
   const loadDevice = async (retries = 3) => {
     try {
@@ -381,8 +419,8 @@ export const DeviceViewerPage: React.FC = () => {
       wsRef.current = null;
     }
 
-    const currentDeviceId = activeDeviceIdRef.current || id;
-    const token = serverToken || localStorage.getItem('vtx_token');
+    const currentDeviceId = activeDeviceIdRef.current || id || shareDeviceId;
+    const token = serverToken || (isPublicShare ? shareSessionToken : localStorage.getItem('vtx_token'));
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
     const wsUrl = serverWsUrl || `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(token || '')}&deviceId=${currentDeviceId}`;
@@ -580,7 +618,7 @@ export const DeviceViewerPage: React.FC = () => {
       console.warn(`[Viewer] WebSocket disconnected (code: ${event.code}). Auto-reconnecting in 1.5s...`);
       if (event.code === 4003 || event.code === 4002) {
         // Forbidden or Stale ID: re-sync device metadata from API instead of looping on invalid token
-        if (isMountedRef.current && !reconnectTimerRef.current) {
+        if (!isPublicShare && isMountedRef.current && !reconnectTimerRef.current) {
           reconnectTimerRef.current = setTimeout(() => {
             if (isMountedRef.current) {
               loadDevice();
@@ -645,7 +683,7 @@ export const DeviceViewerPage: React.FC = () => {
     const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
     wsRef.current.send(JSON.stringify({
       type: 'control-input',
-      deviceId: activeDeviceIdRef.current || id,
+      deviceId: activeDeviceIdRef.current || id || shareDeviceId,
       action,
       data: {
         width: deviceWidth,
@@ -980,16 +1018,27 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   return (
-    <div ref={containerRef} style={{ touchAction: 'none' }} className="h-full flex flex-col space-y-2 md:space-y-4 select-none">
+    <div
+      ref={containerRef}
+      style={{ touchAction: 'none' }}
+      className={`${isPublicShare ? 'min-h-screen bg-gray-950 p-2 md:p-4' : 'h-full'} flex flex-col space-y-2 md:space-y-4 select-none`}
+    >
       {/* Top Controls Bar: Responsive on mobile & desktop */}
       <div className="flex flex-wrap items-center justify-between gap-2 md:gap-4 p-2.5 md:p-4 bg-gray-900/90 border border-gray-800 rounded-xl md:rounded-2xl backdrop-blur shrink-0">
         <div className="flex items-center gap-2 md:gap-3">
-          <button
-            onClick={() => navigate('/devices')}
-            className="p-1.5 md:p-2 rounded-lg md:rounded-xl bg-gray-800 text-gray-300 hover:text-white transition"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </button>
+          {isPublicShare ? (
+            <div className="p-1.5 md:p-2 rounded-lg md:rounded-xl bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
+              <Smartphone className="h-4 w-4" />
+            </div>
+          ) : (
+            <button
+              onClick={() => navigate('/devices')}
+              className="p-1.5 md:p-2 rounded-lg md:rounded-xl bg-gray-800 text-gray-300 hover:text-white transition"
+              title="Back to Devices"
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </button>
+          )}
           <div>
             <h2 className="text-sm md:text-base font-bold text-white flex items-center gap-2">
               <span className="truncate max-w-[140px] md:max-w-none">{device?.device_name || 'Android Device'}</span>
