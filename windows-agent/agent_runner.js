@@ -682,7 +682,7 @@ function startStream(deviceId, targetSerial) {
       // 3. Set up ADB reverse tunnel
       await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${scid}`, `tcp:${port}`]);
 
-      // 4. Accept the 3 scrcpy sockets (Video -> Audio -> Control)
+      // 4. Accept the 2 scrcpy sockets (Video -> Control) — audio=false so no audio socket
       server.on('connection', (sock) => {
         if (!active) {
           sock.destroy();
@@ -697,10 +697,8 @@ function startStream(deviceId, targetSerial) {
         if (!videoSock) {
           videoSock = sock;
           setupVideoSocket(sock);
-        } else if (!audioSock) {
-          audioSock = sock;
-          setupAudioSocket(sock);
         } else if (!controlSock) {
+          // With audio=false: second connection is always the control socket
           controlSock = sock;
           controlSockets.set(serial, sock);
           console.log(`[StreamBridge] 🎮 Native Scrcpy Control channel active for ${serial} (instant no-delay)`);
@@ -896,7 +894,9 @@ function startStream(deviceId, targetSerial) {
         });
       }
 
-      // 5. Spawn scrcpy-server with ultra-low latency profile & rock-solid media audio
+      // 5. Spawn scrcpy-server with ultra-low latency profile
+      // audio=false: keeps scrcpy stable (audio=true with audio_source=playback can crash on many devices)
+      // This means scrcpy only opens 2 sockets: Video -> Control (no audio socket in between)
       const scrcpyServerArgs = [
         '-s', serial,
         'shell',
@@ -910,10 +910,7 @@ function startStream(deviceId, targetSerial) {
         'max_fps=60',
         'stay_awake=true',
         'control=true',
-        'audio=true',
-        'audio_codec=raw',
-        'audio_source=playback', // Captures media audio without crashing on keyboard sonifications
-        'audio_dup=true',        // Allows device to play audio simultaneously without audio track lockouts
+        'audio=false',
         'video_codec_options=low-latency:int=1',
         'downsize_on_error=true',
       ];

@@ -443,17 +443,19 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Instant live-edge synchronization (target: < 30ms latency)
+            // Live-edge synchronization: gentle speed-up to stay close to live
+            // Hard seek only when VERY far behind to avoid decoder black screen loops
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
 
-              if (drift > 0.10 && !videoRef.current.seeking) {
-                // Instantly snap to live edge (sub-30ms) so clicks, pauses, and touches respond immediately
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.02);
-              } else if (drift > 0.04) {
-                videoRef.current.playbackRate = 1.15;
-              } else {
+              if (drift > 1.5 && !videoRef.current.seeking) {
+                // Only hard-seek when truly >1.5s behind (e.g. tab was backgrounded)
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.05);
+              } else if (drift > 0.3) {
+                // Gently speed up 10% to catch up without decoder disruption
+                videoRef.current.playbackRate = 1.1;
+              } else if (drift < 0.05) {
                 videoRef.current.playbackRate = 1.0;
               }
             }
