@@ -312,6 +312,8 @@ export const DeviceViewerPage: React.FC = () => {
 
     // Initialize JMuxer on HTML5 video element for hardware 60 FPS decoding
     if (videoRef.current) {
+      videoRef.current.muted = true;
+      videoRef.current.defaultMuted = true;
       if (jmuxerRef.current) {
         try { jmuxerRef.current.destroy(); } catch (e) {}
       }
@@ -320,7 +322,7 @@ export const DeviceViewerPage: React.FC = () => {
           node: videoRef.current,
           mode: 'video',
           flushingTime: 0,
-          fps: 30,
+          fps: 60,
           clearBuffer: true,
           debug: false,
         });
@@ -441,16 +443,17 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Smooth live-edge rate pacing without decoder flushes or black screens
+            // Instant live-edge synchronization (target: < 30ms latency)
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
 
-              if (drift > 2.0 && !videoRef.current.seeking) {
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.1);
-              } else if (drift > 0.25) {
-                videoRef.current.playbackRate = 1.25;
-              } else if (drift < 0.08) {
+              if (drift > 0.10 && !videoRef.current.seeking) {
+                // Instantly snap to live edge (sub-30ms) so clicks, pauses, and touches respond immediately
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.02);
+              } else if (drift > 0.04) {
+                videoRef.current.playbackRate = 1.15;
+              } else {
                 videoRef.current.playbackRate = 1.0;
               }
             }

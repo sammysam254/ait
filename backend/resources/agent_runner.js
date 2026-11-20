@@ -682,7 +682,7 @@ function startStream(deviceId, targetSerial) {
       // 3. Set up ADB reverse tunnel
       await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${scid}`, `tcp:${port}`]);
 
-      // 4. Accept the scrcpy sockets (Video -> Control; audio disabled to guarantee 0 audio crashes & ultra-low latency)
+      // 4. Accept the 3 scrcpy sockets (Video -> Audio -> Control)
       server.on('connection', (sock) => {
         if (!active) {
           sock.destroy();
@@ -697,6 +697,9 @@ function startStream(deviceId, targetSerial) {
         if (!videoSock) {
           videoSock = sock;
           setupVideoSocket(sock);
+        } else if (!audioSock) {
+          audioSock = sock;
+          setupAudioSocket(sock);
         } else if (!controlSock) {
           controlSock = sock;
           controlSockets.set(serial, sock);
@@ -844,45 +847,56 @@ function startStream(deviceId, targetSerial) {
 
         sock.on('data', (chunk) => {
           if (!active) return;
-          buf = Buffer.concat([buf, chunk]);
+          try {
+            buf = Buffer.concat([buf, chunk]);
 
-          if (!parsedAudioHeader && buf.length >= 4) {
-            const codec = buf.subarray(0, 4).toString('utf8').replace(/\0/g, '');
-            console.log(`[StreamBridge] 🔊 Scrcpy Audio Ready [codec: ${codec || 'raw'}]`);
-            buf = buf.subarray(4);
-            parsedAudioHeader = true;
-          }
+            if (!parsedAudioHeader && buf.length >= 4) {
+              const codec = buf.subarray(0, 4).toString('utf8').replace(/\0/g, '');
+              console.log(`[StreamBridge] 🔊 Scrcpy Audio Ready [codec: ${codec || 'raw'}]`);
+              buf = buf.subarray(4);
+              parsedAudioHeader = true;
+            }
 
-          if (parsedAudioHeader) {
-            while (buf.length >= 12) {
-              const rawHeader = buf.readBigUInt64BE(0);
-              const isConfig = (rawHeader & 0x8000000000000000n) !== 0n;
-              const size = buf.readUInt32BE(8);
+            if (parsedAudioHeader) {
+              while (buf.length >= 12) {
+                const rawHeader = buf.readBigUInt64BE(0);
+                const isConfig = (rawHeader & 0x8000000000000000n) !== 0n;
+                const size = buf.readUInt32BE(8);
 
-              if (buf.length < 12 + size) {
-                break; // Wait for full packet
-              }
+                if (buf.length < 12 + size) {
+                  break; // Wait for full packet
+                }
 
-              const audioData = buf.subarray(12, 12 + size);
-              buf = buf.subarray(12 + size);
+                const audioData = buf.subarray(12, 12 + size);
+                buf = buf.subarray(12 + size);
 
-              // Skip config packets or silent packets (zeros) to prevent flooding cloud websocket
-              if (isConfig || audioData.length === 0 || isPcmSilent(audioData)) continue;
+                // Skip config packets or silent packets (zeros) to prevent flooding cloud websocket
+                if (isConfig || audioData.length === 0 || isPcmSilent(audioData)) continue;
 
-              // Batch active audio chunks into 60ms packets (16 msgs/sec instead of 100 msgs/sec)
-              audioBatch = Buffer.concat([audioBatch, audioData]);
-              const now = Date.now();
-              if (audioBatch.length >= 7680 || now - lastAudioFlush >= 60) {
-                flushAudio();
+                // Batch active audio chunks into 35ms packets for instant, crisp real-time playback
+                audioBatch = Buffer.concat([audioBatch, audioData]);
+                const now = Date.now();
+                if (audioBatch.length >= 7680 || now - lastAudioFlush >= 35) {
+                  flushAudio();
+                }
               }
             }
+          } catch (audioErr) {
+            console.warn('[Audio parser warning]', audioErr.message);
           }
         });
 
-        sock.on('error', () => {});
+        sock.on('error', (err) => {
+          console.warn(`[Audio] socket error for ${serial}:`, err.message);
+        });
+
+        sock.on('close', () => {
+          console.log(`[Audio] socket closed for ${serial}`);
+          audioSock = null;
+        });
       }
 
-      // 5. Spawn scrcpy-server with ultra-low latency profile, letting scrcpy dynamically decide display screen
+      // 5. Spawn scrcpy-server with ultra-low latency profile & rock-solid media audio
       const scrcpyServerArgs = [
         '-s', serial,
         'shell',
@@ -896,7 +910,10 @@ function startStream(deviceId, targetSerial) {
         'max_fps=60',
         'stay_awake=true',
         'control=true',
-        'audio=false', // Disabled: prevents keyboard click sounds & system audio from crashing the stream
+        'audio=true',
+        'audio_codec=raw',
+        'audio_source=playback', // Captures media audio without crashing on keyboard sonifications
+        'audio_dup=true',        // Allows device to play audio simultaneously without audio track lockouts
         'video_codec_options=low-latency:int=1',
         'downsize_on_error=true',
       ];
