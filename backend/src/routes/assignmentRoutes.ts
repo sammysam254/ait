@@ -57,8 +57,8 @@ router.post('/invite', authenticate, async (req: Request, res: Response) => {
   });
 });
 
-// POST /api/assignments/assign - Assign device to subordinate user
-router.post('/assign', authenticate, (req: Request, res: Response) => {
+// POST /api/assignments/assign - Assign device exclusively to subordinate user
+router.post('/assign', authenticate, async (req: Request, res: Response) => {
   const user = req.user!;
   const { deviceId, assignedUserId, canView, canControl, canShare } = req.body;
 
@@ -70,7 +70,7 @@ router.post('/assign', authenticate, (req: Request, res: Response) => {
     return res.status(400).json({ error: 'deviceId and assignedUserId are required.' });
   }
 
-  const result = AssignmentService.assignDevice(
+  const result = await AssignmentService.assignDevice(
     user.organizationId,
     deviceId,
     assignedUserId,
@@ -82,7 +82,13 @@ router.post('/assign', authenticate, (req: Request, res: Response) => {
     return res.status(400).json({ error: result.error });
   }
 
-  return res.json({ success: true, assignment: result.assignment });
+  return res.json({
+    success: true,
+    assignment: result.assignment,
+    share: result.share,
+    plainPin: result.plainPin,
+    message: 'Device assigned exclusively to worker. Previous assignments revoked and PIN rotated.',
+  });
 });
 
 // POST /api/assignments/revoke - Revoke specific device assignment

@@ -253,6 +253,8 @@ export class DeviceService {
       }
     }
 
+    inMemoryDb.save();
+
     return registered;
   }
 

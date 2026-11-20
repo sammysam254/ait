@@ -17,6 +17,8 @@ services:
     env_file:
       - path: .env
         required: false
+    volumes:
+      - ./data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s

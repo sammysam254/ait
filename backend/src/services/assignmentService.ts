@@ -180,85 +180,133 @@ export class AssignmentService {
   }
 
   /**
-   * Assign or update permissions for a device to an assigned user
+   * Assign device exclusively to a subordinate user:
+   * 1. Unassigns the device from any other worker (exclusive 1:1 ownership).
+   * 2. Automatically rotates the device share token and generates a brand new 6-digit PIN.
+   * 3. Invalidates previous credentials so old workers cannot access it anymore.
    */
-  static assignDevice(
+  static async assignDevice(
     organizationId: string,
     deviceId: string,
     assignedUserId: string,
     assignedByUserId: string,
     permissions: { can_view?: boolean; can_control?: boolean; can_share?: boolean }
-  ): { success: boolean; assignment?: DeviceAssignment; error?: string } {
-    // Verify device belongs to this organization
-    const device = inMemoryDb.devices.get(deviceId);
-    if (!device || device.organization_id !== organizationId) {
-      return { success: false, error: 'Device not found in your organization.' };
+  ): Promise<{ success: boolean; assignment?: DeviceAssignment; share?: any; plainPin?: string; error?: string }> {
+    // 1. Locate device by UUID or serial
+    let device = inMemoryDb.devices.get(deviceId);
+    if (!device) {
+      for (const dev of inMemoryDb.devices.values()) {
+        if (dev.adb_serial === deviceId) {
+          device = dev;
+          break;
+        }
+      }
+    }
+    if (!device) {
+      return { success: false, error: 'Device not found.' };
     }
 
-    // Verify user is registered/invited in this organization
-    const au = Array.from(inMemoryDb.assignedUsers.values()).find(
-      u => u.organization_id === organizationId && (
-        u.user_id === assignedUserId ||
-        u.email.toLowerCase() === assignedUserId.toLowerCase() ||
-        u.id === assignedUserId
+    const cleanTargetId = (assignedUserId || '').toLowerCase().trim();
+
+    // 2. Verify target user is registered or invited
+    let au = Array.from(inMemoryDb.assignedUsers.values()).find(
+      u => (
+        u.user_id?.toLowerCase().trim() === cleanTargetId ||
+        u.email?.toLowerCase().trim() === cleanTargetId ||
+        u.id?.toLowerCase().trim() === cleanTargetId
       )
     );
-    if (!au) {
-      return { success: false, error: 'Target user is not registered in this organization.' };
-    }
 
-    // Anchor to registered profile ID if user is already signed up
-    const profile = Array.from(inMemoryDb.profiles.values()).find(p => p.email.toLowerCase() === au.email.toLowerCase());
-    const targetUserId = profile ? profile.id : au.user_id;
-    if (profile && au.user_id !== profile.id) {
+    // Anchor to registered profile if exists
+    const profile = Array.from(inMemoryDb.profiles.values()).find(
+      p => p.id?.toLowerCase().trim() === cleanTargetId || p.email?.toLowerCase().trim() === cleanTargetId
+    );
+
+    if (!au && profile) {
+      au = {
+        id: uuidv4(),
+        organization_id: device.organization_id || organizationId,
+        user_id: profile.id,
+        email: profile.email.toLowerCase().trim(),
+        invited_by: assignedByUserId,
+        status: 'active',
+        created_at: new Date().toISOString(),
+      };
+      inMemoryDb.assignedUsers.set(au.id, au);
+    } else if (au && profile && au.user_id !== profile.id) {
       au.user_id = profile.id;
     }
 
-    // Check existing assignment
-    let assignment = Array.from(inMemoryDb.deviceAssignments.values()).find(
-      da => da.device_id === deviceId && (
-        da.assigned_user_id === targetUserId ||
-        da.assigned_user_id === au.user_id ||
-        da.assigned_user_id.toLowerCase() === au.email.toLowerCase() ||
-        da.assigned_user_id === au.id
-      )
+    const targetUserId = profile ? profile.id : (au ? au.user_id : assignedUserId);
+    const targetEmail = profile ? profile.email : (au ? au.email : (assignedUserId.includes('@') ? assignedUserId : ''));
+
+    // 3. EXCLUSIVE ASSIGNMENT: Unassign device from ANY previous worker
+    for (const [key, da] of inMemoryDb.deviceAssignments.entries()) {
+      if (da.device_id === device.id || (device.adb_serial && da.device_id === device.adb_serial)) {
+        inMemoryDb.deviceAssignments.delete(key);
+      }
+    }
+
+    // 4. ROTATE TOKENS AND PIN: Invalidate previous credentials & generate fresh token and PIN
+    for (const [sKey, share] of inMemoryDb.deviceShares.entries()) {
+      if (share.device_id === device.id) {
+        share.is_revoked = true;
+        inMemoryDb.deviceShares.delete(sKey);
+      }
+    }
+
+    const { share: newShare, plainPin } = await SharingService.createShare(
+      device.id,
+      device.organization_id || organizationId,
+      assignedByUserId,
+      {
+        allowControl: permissions.can_control ?? false,
+        expirationHours: 168, // 7 days
+      }
     );
 
-    if (assignment) {
-      assignment.assigned_user_id = targetUserId;
-      assignment.can_view = permissions.can_view ?? assignment.can_view;
-      assignment.can_control = permissions.can_control ?? assignment.can_control;
-      assignment.can_share = permissions.can_share ?? assignment.can_share;
-      assignment.updated_at = new Date().toISOString();
-    } else {
-      assignment = {
-        id: uuidv4(),
-        organization_id: organizationId,
-        device_id: deviceId,
-        assigned_user_id: targetUserId,
-        can_view: permissions.can_view ?? true,
-        can_control: permissions.can_control ?? false,
-        can_share: permissions.can_share ?? false,
-        assigned_by: assignedByUserId,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      inMemoryDb.deviceAssignments.set(assignment.id, assignment);
-    }
+    // 5. Create new exclusive assignment
+    const assignment: DeviceAssignment = {
+      id: uuidv4(),
+      organization_id: device.organization_id || organizationId,
+      device_id: device.id,
+      assigned_user_id: targetUserId,
+      can_view: permissions.can_view ?? true,
+      can_control: permissions.can_control ?? false,
+      can_share: permissions.can_share ?? false,
+      assigned_by: assignedByUserId,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    inMemoryDb.deviceAssignments.set(assignment.id, assignment);
 
     // Audit log
     inMemoryDb.auditLogs.unshift({
       id: uuidv4(),
-      organization_id: organizationId,
+      organization_id: device.organization_id || organizationId,
       user_id: assignedByUserId,
-      action: 'DEVICE_ASSIGNED',
+      action: 'DEVICE_EXCLUSIVE_ASSIGNED_WITH_PIN_ROTATION',
       resource_type: 'device_assignment',
       resource_id: assignment.id,
-      details: { deviceId, assignedUserId: targetUserId, permissions },
+      details: {
+        deviceId: device.id,
+        assignedUserId: targetUserId,
+        assignedEmail: targetEmail,
+        newShareToken: newShare.share_token,
+        newPin: plainPin,
+        permissions,
+      },
       created_at: new Date().toISOString(),
     });
 
-    return { success: true, assignment };
+    inMemoryDb.save();
+
+    return {
+      success: true,
+      assignment,
+      share: newShare,
+      plainPin,
+    };
   }
 
   /**

@@ -1,4 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import path from 'path';
+import fs from 'fs';
 import { config } from '../config';
 
 let supabaseClient: SupabaseClient | null = null;
@@ -171,8 +173,75 @@ class InMemoryDatabase {
   invitations: Map<string, Invitation> = new Map();
   auditLogs: AuditLog[] = [];
 
+  private dbFilePath = process.env.VERTEX_DATA_PATH || path.join(process.cwd(), 'data', 'vertex_state.json');
+
   constructor() {
     this.seedSuperAdmin();
+    this.load();
+  }
+
+  load() {
+    try {
+      if (fs.existsSync(this.dbFilePath)) {
+        const raw = fs.readFileSync(this.dbFilePath, 'utf8');
+        const data = JSON.parse(raw);
+        if (data.profiles) {
+          for (const [k, v] of Object.entries(data.profiles)) this.profiles.set(k, v as Profile);
+        }
+        if (data.organizations) {
+          for (const [k, v] of Object.entries(data.organizations)) this.organizations.set(k, v as Organization);
+        }
+        if (data.agents) {
+          for (const [k, v] of Object.entries(data.agents)) this.agents.set(k, v as Agent);
+        }
+        if (data.enrollmentTokens) {
+          for (const [k, v] of Object.entries(data.enrollmentTokens)) this.enrollmentTokens.set(k, v as EnrollmentToken);
+        }
+        if (data.devices) {
+          for (const [k, v] of Object.entries(data.devices)) this.devices.set(k, v as Device);
+        }
+        if (data.deviceShares) {
+          for (const [k, v] of Object.entries(data.deviceShares)) this.deviceShares.set(k, v as DeviceShare);
+        }
+        if (data.assignedUsers) {
+          for (const [k, v] of Object.entries(data.assignedUsers)) this.assignedUsers.set(k, v as AssignedUser);
+        }
+        if (data.deviceAssignments) {
+          for (const [k, v] of Object.entries(data.deviceAssignments)) this.deviceAssignments.set(k, v as DeviceAssignment);
+        }
+        if (data.invitations) {
+          for (const [k, v] of Object.entries(data.invitations)) this.invitations.set(k, v as Invitation);
+        }
+        if (Array.isArray(data.auditLogs)) this.auditLogs = data.auditLogs;
+        console.log(`[Database] Loaded persistent state (${this.devices.size} devices, ${this.deviceAssignments.size} assignments, ${this.assignedUsers.size} workers) from ${this.dbFilePath}`);
+      }
+    } catch (err: any) {
+      console.warn('[Database] State file load warning:', err.message);
+    }
+  }
+
+  save() {
+    try {
+      const dir = path.dirname(this.dbFilePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const data = {
+        profiles: Object.fromEntries(this.profiles),
+        organizations: Object.fromEntries(this.organizations),
+        agents: Object.fromEntries(this.agents),
+        enrollmentTokens: Object.fromEntries(this.enrollmentTokens),
+        devices: Object.fromEntries(this.devices),
+        deviceShares: Object.fromEntries(this.deviceShares),
+        assignedUsers: Object.fromEntries(this.assignedUsers),
+        deviceAssignments: Object.fromEntries(this.deviceAssignments),
+        invitations: Object.fromEntries(this.invitations),
+        auditLogs: this.auditLogs.slice(0, 500),
+      };
+      fs.writeFileSync(this.dbFilePath, JSON.stringify(data, null, 2), 'utf8');
+    } catch (err: any) {
+      console.warn('[Database] State file save error:', err.message);
+    }
   }
 
   private seedSuperAdmin() {
