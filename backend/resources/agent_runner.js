@@ -775,16 +775,9 @@ function startStream(deviceId, targetSerial) {
     let audioBatch = Buffer.alloc(0);
     let lastAudioFlush = Date.now();
 
-    function isPcmSilent(pcm) {
-      for (let i = 0; i < pcm.length; i += 8) {
-        if (pcm[i] !== 0 || pcm[i + 1] !== 0) return false;
-      }
-      return true;
-    }
-
     function flushAudio() {
       if (audioBatch.length === 0) return;
-      if (ws && ws.readyState === 1 && ws.bufferedAmount <= 128 * 1024) {
+      if (ws && ws.readyState === 1 && ws.bufferedAmount <= 256 * 1024) {
         const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
         if (targetDevId) {
           try {
@@ -801,10 +794,12 @@ function startStream(deviceId, targetSerial) {
       try {
         buf = Buffer.concat([buf, chunk]);
 
-        if (!parsedAudioHeader && buf.length >= 4) {
-          const codec = buf.subarray(0, 4).toString('utf8').replace(/\0/g, '');
-          console.log(`[StreamBridge] 🔊 Audio-only scrcpy ready [codec: ${codec || 'raw'}] for ${serial}`);
-          buf = buf.subarray(4);
+        // Scrcpy stream socket sends: 64-byte deviceName + 4-byte codec = 68 bytes total header
+        if (!parsedAudioHeader && buf.length >= 68) {
+          const deviceName = buf.subarray(0, 64).toString('utf8').replace(/\0/g, '');
+          const codec = buf.subarray(64, 68).toString('utf8').replace(/\0/g, '');
+          console.log(`[StreamBridge] 🔊 Audio-only scrcpy ready: ${deviceName} [codec: ${codec || 'raw'}] for ${serial}`);
+          buf = buf.subarray(68);
           parsedAudioHeader = true;
         }
 
@@ -818,11 +813,12 @@ function startStream(deviceId, targetSerial) {
             const audioData = buf.subarray(12, 12 + size);
             buf = buf.subarray(12 + size);
 
-            if (isConfig || audioData.length === 0 || isPcmSilent(audioData)) continue;
+            if (isConfig || audioData.length === 0) continue;
 
             audioBatch = Buffer.concat([audioBatch, audioData]);
             const now = Date.now();
-            if (audioBatch.length >= 7680 || now - lastAudioFlush >= 35) {
+            // Batch ~20-30ms audio packets for low-latency, uninterrupted playback
+            if (audioBatch.length >= 4096 || now - lastAudioFlush >= 25) {
               flushAudio();
             }
           }

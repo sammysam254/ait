@@ -49,6 +49,7 @@ export const DeviceViewerPage: React.FC = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
+  const nextAudioTimeRef = useRef<number>(0);
   const reconnectTimerRef = useRef<any>(null);
   const isMountedRef = useRef<boolean>(true);
   const activeDeviceIdRef = useRef<string>(id || '');
@@ -118,18 +119,22 @@ export const DeviceViewerPage: React.FC = () => {
         const ctx = new AudioCtx({ sampleRate: 48000, latencyHint: 'interactive' });
         audioCtxRef.current = ctx;
 
-        const blob = new Blob([PCM_WORKLET_CODE], { type: 'application/javascript' });
-        const url = URL.createObjectURL(blob);
-        await ctx.audioWorklet.addModule(url);
-        URL.revokeObjectURL(url);
+        try {
+          const blob = new Blob([PCM_WORKLET_CODE], { type: 'application/javascript' });
+          const url = URL.createObjectURL(blob);
+          await ctx.audioWorklet.addModule(url);
+          URL.revokeObjectURL(url);
 
-        const worklet = new AudioWorkletNode(ctx, 'pcm-worklet', {
-          outputChannelCount: [2],
-        });
-        workletRef.current = worklet;
-        worklet.connect(ctx.destination);
+          const worklet = new AudioWorkletNode(ctx, 'pcm-worklet', {
+            outputChannelCount: [2],
+          });
+          workletRef.current = worklet;
+          worklet.connect(ctx.destination);
+        } catch (workletErr) {
+          console.warn('[Audio] AudioWorklet init failed, fallback to WebAudio buffer mode:', workletErr);
+        }
       }
-      if (audioCtxRef.current.state === 'suspended') {
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
         await audioCtxRef.current.resume();
       }
       setIsMuted(false);
@@ -187,7 +192,15 @@ export const DeviceViewerPage: React.FC = () => {
   // Decode raw PCM Int16 LE stereo 48kHz audio packets and transfer zero-copy to the AudioWorklet
   const playPcmAudio = (rawBytes: Uint8Array) => {
     try {
-      if (isMuted || !workletRef.current || !audioCtxRef.current || audioCtxRef.current.state !== 'running') return;
+      if (isMuted) return;
+
+      if (!audioCtxRef.current) {
+        startAudio();
+        return;
+      }
+      if (audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume().catch(() => {});
+      }
 
       // Strip WAV header if present (RIFF)
       let pcm = rawBytes;
@@ -215,10 +228,24 @@ export const DeviceViewerPage: React.FC = () => {
         right[i] = samples[i * 2 + 1] / 32768.0;
       }
 
-      workletRef.current.port.postMessage(
-        { channels: [left, right], numFrames: frameCount },
-        [left.buffer, right.buffer]
-      );
+      if (workletRef.current) {
+        workletRef.current.port.postMessage(
+          { channels: [left, right], numFrames: frameCount },
+          [left.buffer, right.buffer]
+        );
+      } else if (audioCtxRef.current && audioCtxRef.current.state === 'running') {
+        // High-performance fallback: Web Audio Buffer Source scheduler
+        const buffer = audioCtxRef.current.createBuffer(2, frameCount, 48000);
+        buffer.copyToChannel(left, 0);
+        buffer.copyToChannel(right, 1);
+        const source = audioCtxRef.current.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtxRef.current.destination);
+        const now = audioCtxRef.current.currentTime;
+        const playTime = Math.max(now, nextAudioTimeRef.current);
+        source.start(playTime);
+        nextAudioTimeRef.current = playTime + buffer.duration;
+      }
     } catch (e) {}
   };
 
