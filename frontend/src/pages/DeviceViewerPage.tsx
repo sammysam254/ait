@@ -58,6 +58,9 @@ export const DeviceViewerPage: React.FC = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
+  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioRingBufferRef = useRef<{ left: Float32Array; right: Float32Array; writeIdx: number; readIdx: number } | null>(null);
+  const lastSyncCheckRef = useRef<number>(0);
   const nextAudioTimeRef = useRef<number>(0);
   const reconnectTimerRef = useRef<any>(null);
   const isMountedRef = useRef<boolean>(true);
@@ -128,6 +131,15 @@ export const DeviceViewerPage: React.FC = () => {
         const ctx = new AudioCtx({ sampleRate: 48000, latencyHint: 'interactive' });
         audioCtxRef.current = ctx;
 
+        // Preallocate ring buffer for zero-allocation audio fallback (65536 samples ~ 1.36s)
+        const RING_SIZE = 65536;
+        audioRingBufferRef.current = {
+          left: new Float32Array(RING_SIZE),
+          right: new Float32Array(RING_SIZE),
+          writeIdx: 0,
+          readIdx: 0,
+        };
+
         try {
           const blob = new Blob([PCM_WORKLET_CODE], { type: 'application/javascript' });
           const url = URL.createObjectURL(blob);
@@ -140,7 +152,39 @@ export const DeviceViewerPage: React.FC = () => {
           workletRef.current = worklet;
           worklet.connect(ctx.destination);
         } catch (workletErr) {
-          console.warn('[Audio] AudioWorklet init failed, fallback to WebAudio buffer mode:', workletErr);
+          // Zero-allocation ScriptProcessor fallback for mobile browsers where AudioWorklet blob is blocked
+          try {
+            const scriptNode = ctx.createScriptProcessor(2048, 0, 2);
+            const mask = RING_SIZE - 1;
+            scriptNode.onaudioprocess = (e) => {
+              const outL = e.outputBuffer.getChannelData(0);
+              const outR = e.outputBuffer.getChannelData(1);
+              const rb = audioRingBufferRef.current;
+              if (!rb) {
+                outL.fill(0);
+                outR.fill(0);
+                return;
+              }
+              const available = (rb.writeIdx - rb.readIdx) & mask;
+              // Drop stale audio if backlog exceeds ~150ms to keep audio real-time without buffering
+              if (available > 7200) {
+                rb.readIdx = (rb.writeIdx - 3600) & mask;
+              }
+              const len = outL.length;
+              for (let i = 0; i < len; i++) {
+                if (((rb.writeIdx - rb.readIdx) & mask) > 0) {
+                  outL[i] = rb.left[rb.readIdx];
+                  outR[i] = rb.right[rb.readIdx];
+                  rb.readIdx = (rb.readIdx + 1) & mask;
+                } else {
+                  outL[i] = 0;
+                  outR[i] = 0;
+                }
+              }
+            };
+            scriptNode.connect(ctx.destination);
+            scriptProcessorRef.current = scriptNode;
+          } catch (scriptErr) {}
         }
       }
       if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
@@ -173,15 +217,15 @@ export const DeviceViewerPage: React.FC = () => {
         if (!isMuted && audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
           audioCtxRef.current.resume().catch(() => {});
         }
-        if (videoRef.current && videoRef.current.buffered.length > 0) {
-          const live = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
-          videoRef.current.currentTime = Math.max(0, live - 0.01);
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          const currentDeviceId = activeDeviceIdRef.current || id;
+          wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: currentDeviceId }));
         }
       }
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [isMuted]);
+  }, [isMuted, id]);
 
   const stopAudio = () => {
     setIsMuted(true);
@@ -239,18 +283,16 @@ export const DeviceViewerPage: React.FC = () => {
           { channels: [left, right], numFrames: frameCount },
           [left.buffer, right.buffer]
         );
-      } else if (audioCtxRef.current && audioCtxRef.current.state === 'running') {
-        // High-performance fallback: Web Audio Buffer Source scheduler
-        const buffer = audioCtxRef.current.createBuffer(2, frameCount, 48000);
-        buffer.copyToChannel(left, 0);
-        buffer.copyToChannel(right, 1);
-        const source = audioCtxRef.current.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioCtxRef.current.destination);
-        const now = audioCtxRef.current.currentTime;
-        const playTime = Math.max(now, nextAudioTimeRef.current);
-        source.start(playTime);
-        nextAudioTimeRef.current = playTime + buffer.duration;
+      } else if (audioRingBufferRef.current) {
+        // Zero-allocation ring buffer fallback: completely eliminates GC stutter and audio queue lag
+        const rb = audioRingBufferRef.current;
+        const mask = rb.left.length - 1;
+        for (let i = 0; i < frameCount; i++) {
+          const idx = (rb.writeIdx + i) & mask;
+          rb.left[idx] = left[i];
+          rb.right[idx] = right[i];
+        }
+        rb.writeIdx = (rb.writeIdx + frameCount) & mask;
       }
     } catch (e) {}
   };
@@ -287,6 +329,10 @@ export const DeviceViewerPage: React.FC = () => {
       if (workletRef.current) {
         try { workletRef.current.disconnect(); } catch (e) {}
         workletRef.current = null;
+      }
+      if (scriptProcessorRef.current) {
+        try { scriptProcessorRef.current.disconnect(); } catch (e) {}
+        scriptProcessorRef.current = null;
       }
       if (audioCtxRef.current) {
         try { audioCtxRef.current.close(); } catch (e) {}
@@ -481,17 +527,33 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Smooth zero-seeking live edge sync: accelerates playback to stay real-time without black screen decoder stalls
-            if (videoRef.current && videoRef.current.buffered.length > 0) {
-              const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
-              const drift = liveEdge - videoRef.current.currentTime;
+            // Smooth live-edge sync: throttled to 200ms with gentle catchup (max 1.12x) to prevent mobile decoder stalls
+            const nowTs = performance.now();
+            if (nowTs - lastSyncCheckRef.current >= 200) {
+              lastSyncCheckRef.current = nowTs;
+              if (videoRef.current && videoRef.current.buffered.length > 0) {
+                const buf = videoRef.current.buffered;
+                const liveEdge = buf.end(buf.length - 1);
+                const drift = liveEdge - videoRef.current.currentTime;
 
-              if (drift > 0.25) {
-                videoRef.current.playbackRate = 1.35;
-              } else if (drift > 0.08) {
-                videoRef.current.playbackRate = 1.15;
-              } else if (drift < 0.03) {
-                videoRef.current.playbackRate = 1.0;
+                let targetRate = 1.0;
+                if (drift > 0.35) {
+                  targetRate = 1.12; // Gentle catchup without overwhelming mobile decoders
+                } else if (drift > 0.12) {
+                  targetRate = 1.05;
+                } else if (drift <= 0.05) {
+                  targetRate = 1.0;
+                }
+
+                if (Math.abs(videoRef.current.playbackRate - targetRate) > 0.01) {
+                  videoRef.current.playbackRate = targetRate;
+                }
+
+                // If severe drift occurs (> 1.2s from background tab or network lag), request keyframe to cleanly resync
+                if (drift > 1.2 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  const currentDeviceId = activeDeviceIdRef.current || id;
+                  wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: currentDeviceId }));
+                }
               }
             }
           } catch (e) {
@@ -666,6 +728,24 @@ export const DeviceViewerPage: React.FC = () => {
       el.removeEventListener('wheel', onWheel);
     };
   }, [canControl, device, streamDimensions]);
+
+  // Periodic SourceBuffer maintenance: evicts video played > 2s ago so mobile GPU memory never overflows
+  useEffect(() => {
+    const pruneTimer = setInterval(() => {
+      if (!videoRef.current || !jmuxerRef.current) return;
+      try {
+        const buf = videoRef.current.buffered;
+        if (buf && buf.length > 0) {
+          const start = buf.start(0);
+          const cur = videoRef.current.currentTime;
+          if (cur - start > 2.0 && typeof jmuxerRef.current.clearBuffer === 'function') {
+            jmuxerRef.current.clearBuffer();
+          }
+        }
+      } catch (e) {}
+    }, 3000);
+    return () => clearInterval(pruneTimer);
+  }, []);
 
   const pendingMoveRef = useRef<{ x: number; y: number } | null>(null);
   const rafIdRef = useRef<number | null>(null);

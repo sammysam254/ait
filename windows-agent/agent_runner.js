@@ -1021,12 +1021,13 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'video_bit_rate=2500000',
+        'max_size=1280',
+        'video_bit_rate=2000000',
         'max_fps=60',
         'stay_awake=true',
         'control=true',
         'audio=false',
-        'video_codec_options=i-frame-interval:int=1,low-latency:int=1',
+        'video_codec_options=i-frame-interval:int=1',
         'downsize_on_error=true',
       ]);
 
