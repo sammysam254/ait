@@ -360,8 +360,77 @@ async function injectInput(serial, action, data) {
           return true;
         }
         case 'touch_up': {
+          const prev = lastTouchState.get(serial);
+          const holdTime = prev ? (Date.now() - prev.time) : 50;
           lastTouchState.set(serial, { isDown: false, x, y, width: targetW, height: targetH, time: Date.now() });
-          sendScrcpyTouch(sock, 1, x, y, targetW, targetH);
+
+          // 1. Natural inertial swipe / flick gesture:
+          // Injects 5 rapid ACTION_MOVE events along the velocity vector so Android's VelocityTracker
+          // registers exit momentum and triggers native smooth fling scrolling physics!
+          if (data && data.isFlick && data.speed > 0.15) {
+            const dx = scaleX(data.dx || 0);
+            const dy = scaleY(data.dy || 0);
+            const dist = Math.hypot(dx, dy);
+
+            // Extension distance proportional to user flick velocity
+            const boostFactor = Math.min(1.4, Math.max(0.6, (data.speed || 0.5) * 0.8));
+            const extraDist = Math.min(targetH * 0.45, Math.max(140, dist * boostFactor));
+            const dirX = dist > 0 ? (dx / dist) : 0;
+            const dirY = dist > 0 ? (dy / dist) : ((data.dy || 0) < 0 ? -1 : 1);
+
+            const flingSteps = 5;
+            const stepInterval = 10; // 10ms per step (100Hz)
+
+            for (let i = 1; i <= flingSteps; i++) {
+              const t = i / flingSteps;
+              // Decelerating velocity curve (quadratic ease-out)
+              const ease = 1 - Math.pow(1 - t, 2);
+              const curX = Math.round(x + dirX * extraDist * ease);
+              const curY = Math.round(y + dirY * extraDist * ease);
+
+              setTimeout(() => {
+                const s = controlSockets.get(serial);
+                const curState = lastTouchState.get(serial);
+                // Only proceed if touch hasn't been superseded by a new down gesture
+                if (s && !s.destroyed && (!curState || !curState.isDown)) {
+                  if (i < flingSteps) {
+                    sendScrcpyTouch(s, 2, curX, curY, targetW, targetH); // ACTION_MOVE
+                  } else {
+                    sendScrcpyTouch(s, 2, curX, curY, targetW, targetH); // final position
+                    sendScrcpyTouch(s, 1, curX, curY, targetW, targetH); // ACTION_UP with high exit fling velocity
+                  }
+                }
+              }, i * stepInterval);
+            }
+            return true;
+          }
+
+          // 2. Pure instant tap: ensure 24ms hold duration so Android View.performClick registers 100% reliably
+          if (data && data.isTap) {
+            if (holdTime < 24) {
+              setTimeout(() => {
+                const s = controlSockets.get(serial);
+                if (s && !s.destroyed) {
+                  sendScrcpyTouch(s, 1, x, y, targetW, targetH);
+                }
+              }, 24 - holdTime);
+            } else {
+              sendScrcpyTouch(sock, 1, x, y, targetW, targetH);
+            }
+            return true;
+          }
+
+          // 3. Normal drag release / hold
+          if (holdTime < 24) {
+            setTimeout(() => {
+              const s = controlSockets.get(serial);
+              if (s && !s.destroyed) {
+                sendScrcpyTouch(s, 1, x, y, targetW, targetH);
+              }
+            }, 24 - holdTime);
+          } else {
+            sendScrcpyTouch(sock, 1, x, y, targetW, targetH);
+          }
           return true;
         }
         case 'scroll':
@@ -374,7 +443,7 @@ async function injectInput(serial, action, data) {
             if (s && !s.destroyed) {
               sendScrcpyTouch(s, 1, x, y, targetW, targetH);
             }
-          }, 25);
+          }, 32);
           return true;
         case 'text':
           if (data && data.text) {
@@ -468,7 +537,17 @@ async function injectInput(serial, action, data) {
       }
       case 'touch_down':
       case 'touch_move':
+        return true;
       case 'touch_up':
+        if (data && data.isFlick) {
+          const sx = Math.round(data.x - (data.dx || 0));
+          const sy = Math.round(data.y - (data.dy || 0));
+          const ex = Math.round(data.x);
+          const ey = Math.round(data.y);
+          sendShellInput(serial, `input swipe ${sx} ${sy} ${ex} ${ey} 120`);
+        } else if (data && data.isTap) {
+          sendShellInput(serial, `input tap ${Math.round(data.x)} ${Math.round(data.y)}`);
+        }
         return true;
       case 'swipe': {
         const { startX, startY, endX, endY, durationMs } = data;

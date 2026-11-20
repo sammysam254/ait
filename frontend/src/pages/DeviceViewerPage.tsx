@@ -667,6 +667,9 @@ export const DeviceViewerPage: React.FC = () => {
     };
   }, [canControl, device, streamDimensions]);
 
+  const pendingMoveRef = useRef<{ x: number; y: number } | null>(null);
+  const rafIdRef = useRef<number | null>(null);
+
   // High-performance unified Pointer Events for mouse, mobile touch, and stylus with 0ms delay
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.cancelable) e.preventDefault();
@@ -693,7 +696,11 @@ export const DeviceViewerPage: React.FC = () => {
       time: performance.now(),
     };
     isPointerDraggingRef.current = false;
-    lastMoveSentRef.current = 0;
+    pendingMoveRef.current = null;
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
 
     // Send touch_down IMMEDIATELY with 0ms delay!
     sendInput('touch_down', { x: coords.x, y: coords.y });
@@ -703,40 +710,107 @@ export const DeviceViewerPage: React.FC = () => {
     if (!pointerDownPosRef.current || !canControl) return;
     if (e.cancelable) e.preventDefault();
 
-    const now = performance.now();
-    // 75Hz (13ms) throttle: keeps movement 100% fluid and 1:1 while completely eliminating WebSocket network queue lag!
-    if (now - lastMoveSentRef.current < 13) return;
-    lastMoveSentRef.current = now;
-
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    sendInput('touch_move', { x: coords.x, y: coords.y });
+    const dx = coords.x - pointerDownPosRef.current.x;
+    const dy = coords.y - pointerDownPosRef.current.y;
+    const dist = Math.hypot(dx, dy);
+
+    // Suppress micro finger jitter (< 6px) so taps remain pure 0ms taps
+    if (!isPointerDraggingRef.current) {
+      if (dist < 6) return;
+      isPointerDraggingRef.current = true;
+    }
+
+    pendingMoveRef.current = coords;
+
+    // VSYNC-synchronized RAF streaming: locks movement to the phone display refresh (60/90/120Hz)
+    // Completely eliminates timer-skips and micro-stutters on mobile touches
+    if (rafIdRef.current === null) {
+      rafIdRef.current = requestAnimationFrame(() => {
+        rafIdRef.current = null;
+        if (pendingMoveRef.current && pointerDownPosRef.current) {
+          sendInput('touch_move', pendingMoveRef.current);
+          pendingMoveRef.current = null;
+        }
+      });
+    }
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!pointerDownPosRef.current || !canControl) return;
     if (e.cancelable) e.preventDefault();
 
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch (err) {}
 
     const coords = getDeviceCoords(e.clientX, e.clientY);
-    const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
+    const currentPos = coords || pendingMoveRef.current || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
 
-    sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
+    if (pendingMoveRef.current) {
+      sendInput('touch_move', pendingMoveRef.current);
+      pendingMoveRef.current = null;
+    }
+
+    const startX = pointerDownPosRef.current.x;
+    const startY = pointerDownPosRef.current.y;
+    const endX = currentPos.x;
+    const endY = currentPos.y;
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const dist = Math.hypot(dx, dy);
+    const dt = Math.max(1, performance.now() - pointerDownPosRef.current.time);
+    const speed = dist / dt; // pixels per ms
+
+    // Gesture detection:
+    // 1. Instant Tap: minimal movement (< 10px) and quick duration (< 350ms)
+    // 2. Natural Swipe / Flick: displacement >= 15px with fast flick duration (< 400ms or speed > 0.20 px/ms)
+    const isTap = dist < 10 && dt < 350;
+    const isFlick = !isTap && dist >= 15 && (dt < 400 || speed > 0.20);
+
+    if (isTap) {
+      // Pure instant tap dispatched at exact down coordinates
+      sendInput('touch_up', { x: startX, y: startY, isTap: true });
+    } else if (isFlick) {
+      // Natural flick gesture: carries release velocity to trigger Android's native smooth fling physics
+      sendInput('touch_up', {
+        x: endX,
+        y: endY,
+        isFlick: true,
+        dx,
+        dy,
+        dist,
+        speed,
+        dt,
+      });
+    } else {
+      // Sustained manual drag or hold release
+      sendInput('touch_up', { x: endX, y: endY });
+    }
+
     pointerDownPosRef.current = null;
     isPointerDraggingRef.current = false;
     cachedRectRef.current = null;
   };
 
   const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
     if (pointerDownPosRef.current && canControl) {
       const coords = getDeviceCoords(e.clientX, e.clientY);
-      const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
+      const currentPos = coords || pendingMoveRef.current || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
       sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
     }
+    pendingMoveRef.current = null;
     pointerDownPosRef.current = null;
     isPointerDraggingRef.current = false;
     cachedRectRef.current = null;
@@ -745,11 +819,16 @@ export const DeviceViewerPage: React.FC = () => {
   // Global release handler: ensures touch_up is NEVER dropped even if dragged off-screen on mobile or desktop
   useEffect(() => {
     const onGlobalPointerUp = () => {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
       if (pointerDownPosRef.current && canControl) {
         sendInput('touch_up', { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y });
         pointerDownPosRef.current = null;
         isPointerDraggingRef.current = false;
         cachedRectRef.current = null;
+        pendingMoveRef.current = null;
       }
     };
     window.addEventListener('pointerup', onGlobalPointerUp);
