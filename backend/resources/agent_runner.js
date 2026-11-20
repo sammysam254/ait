@@ -843,8 +843,8 @@ function startStream(deviceId, targetSerial) {
         await execAdb(['-s', serial, 'push', scrcpyServerJarPath, '/data/local/tmp/scrcpy-server.jar']);
       }
 
-      // Ephemeral port + ADB reverse tunnel
-      scid = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+      // Ephemeral port + ADB reverse tunnel (scid must be <= 0x7fffffff to avoid Java Integer.parseInt overflow)
+      scid = Math.floor(Math.random() * 0x7fffffff).toString(16).padStart(8, '0');
       server = net.createServer();
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const port = server.address().port;
@@ -931,8 +931,8 @@ function startStream(deviceId, targetSerial) {
 
     (async () => {
       try {
-        // Separate scid so it never conflicts with the video tunnel
-        audioScid = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+        // Separate scid (<= 0x7fffffff to avoid Java Integer.parseInt overflow)
+        audioScid = Math.floor(Math.random() * 0x7fffffff).toString(16).padStart(8, '0');
         audioServer = net.createServer();
         await new Promise((resolve) => audioServer.listen(0, '127.0.0.1', resolve));
         const audioPort = audioServer.address().port;
