@@ -637,8 +637,10 @@ function startStream(deviceId, targetSerial) {
   console.log(`[StreamBridge] 🚀 Launching pure 60 FPS hardware scrcpy stream for ${deviceId} (${serial})...`);
 
   let active = true;
-  let scrcpyProc = null;
+  let scrcpyProc = null;    // Video + Control process (always stable)
+  let audioProc = null;     // Audio-only process (independent, crash-safe)
   let server = null;
+  let audioServer = null;
   let videoSock = null;
   let audioSock = null;
   let controlSock = null;
@@ -646,260 +648,233 @@ function startStream(deviceId, targetSerial) {
   let lastStatsTime = Date.now();
   let cachedConfig = null;
   let scid = '';
+  let audioScid = '';
 
   const streamObj = {
     stop: () => {
       active = false;
       activeStreams.delete(serial);
       if (controlSock) { controlSock.destroy(); controlSockets.delete(serial); }
-      if (videoSock) videoSock.destroy();
-      if (audioSock) audioSock.destroy();
-      if (server) server.close();
-      if (scrcpyProc) {
-        try { scrcpyProc.kill(); } catch (e) {}
-      }
+      if (videoSock) { try { videoSock.destroy(); } catch (e) {} }
+      if (audioSock) { try { audioSock.destroy(); } catch (e) {} }
+      if (server) { try { server.close(); } catch (e) {} }
+      if (audioServer) { try { audioServer.close(); } catch (e) {} }
+      if (scrcpyProc) { try { scrcpyProc.kill(); } catch (e) {} }
+      if (audioProc) { try { audioProc.kill(); } catch (e) {} }
       if (scid) {
         execFile(adbPath, ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${scid}`], () => {});
+      }
+      if (audioScid) {
+        execFile(adbPath, ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${audioScid}`], () => {});
       }
     },
     serial,
   };
   activeStreams.set(serial, streamObj);
 
+  // ─── Shared helpers (defined before async IIFE so both pipelines can use them) ───
+  const AUD_PREFIX = Buffer.from('AUD:');
+  let cachedTargetDevId = '';
+  let targetDevIdBuf = Buffer.alloc(0);
+  function getTargetDevIdBuf(devId) {
+    if (devId !== cachedTargetDevId) {
+      cachedTargetDevId = devId;
+      targetDevIdBuf = Buffer.from(devId, 'utf8');
+    }
+    return targetDevIdBuf;
+  }
+
+  // ─── Video socket handler ───────────────────────────────────────────────────────
+  function setupVideoSocket(sock) {
+    let buf = Buffer.alloc(0);
+    let parsedHeader = false;
+
+    sock.on('data', (chunk) => {
+      if (!active) return;
+      buf = Buffer.concat([buf, chunk]);
+
+      if (!parsedHeader && buf.length >= 76) {
+        const deviceName = buf.subarray(0, 64).toString('utf8').replace(/\0/g, '');
+        const codec = buf.subarray(64, 68).toString('utf8');
+        const width = buf.readUInt32BE(68);
+        const height = buf.readUInt32BE(72);
+        deviceDimensions.set(serial, { width, height });
+        console.log(`[StreamBridge] 📱 Scrcpy Video Ready: ${deviceName} [${width}x${height}, ${codec}]`);
+        buf = buf.subarray(76);
+        parsedHeader = true;
+
+        if (ws && ws.readyState === 1) {
+          const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+          try {
+            ws.send(JSON.stringify({ type: 'device-dimensions', deviceId: targetDevId, serial, width, height }));
+          } catch (e) {}
+        }
+      }
+
+      if (parsedHeader) {
+        while (buf.length >= 12) {
+          const rawHeader = buf.readBigUInt64BE(0);
+          const size = buf.readUInt32BE(8);
+          if (buf.length < 12 + size) break;
+
+          const isConfig = (rawHeader & 0x8000000000000000n) !== 0n;
+          const isKeyframe = (rawHeader & 0x4000000000000000n) !== 0n;
+          const packetData = buf.subarray(12, 12 + size);
+          buf = buf.subarray(12 + size);
+
+          if (isConfig) {
+            cachedConfig = packetData;
+          } else if (isKeyframe) {
+            const fullKeyframe = cachedConfig ? Buffer.concat([cachedConfig, packetData]) : packetData;
+            cachedKeyframes.set(serial, fullKeyframe);
+            if (ws && ws.readyState === 1) {
+              const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+              if (targetDevId) {
+                try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), fullKeyframe])); } catch (e) {}
+              }
+            }
+            framesSent++;
+          } else {
+            if (ws && ws.readyState === 1) {
+              if (ws.bufferedAmount <= 2 * 1024 * 1024) {
+                const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                if (targetDevId) {
+                  try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), packetData])); } catch (e) {}
+                }
+                framesSent++;
+              } else {
+                const ctrl = controlSockets.get(serial);
+                if (ctrl && !ctrl.destroyed) {
+                  try { ctrl.write(Buffer.from([17])); } catch (e) {}
+                }
+              }
+            }
+          }
+
+          const now = Date.now();
+          if (now - lastStatsTime >= 3000) {
+            const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
+            console.log(`[Stream] ⚡ scrcpy hardware stream: ~${fps} FPS | ${serial}`);
+            framesSent = 0;
+            lastStatsTime = now;
+          }
+        }
+      }
+    });
+
+    sock.on('error', () => {});
+    sock.on('close', () => {
+      if (active) setTimeout(() => startStream(deviceId, serial), 1000);
+    });
+  }
+
+  // ─── Audio socket handler ───────────────────────────────────────────────────────
+  function setupAudioSocket(sock) {
+    let buf = Buffer.alloc(0);
+    let parsedAudioHeader = false;
+    let audioBatch = Buffer.alloc(0);
+    let lastAudioFlush = Date.now();
+
+    function isPcmSilent(pcm) {
+      for (let i = 0; i < pcm.length; i += 8) {
+        if (pcm[i] !== 0 || pcm[i + 1] !== 0) return false;
+      }
+      return true;
+    }
+
+    function flushAudio() {
+      if (audioBatch.length === 0) return;
+      if (ws && ws.readyState === 1 && ws.bufferedAmount <= 128 * 1024) {
+        const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+        if (targetDevId) {
+          try {
+            ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), AUD_PREFIX, audioBatch]));
+          } catch (e) {}
+        }
+      }
+      audioBatch = Buffer.alloc(0);
+      lastAudioFlush = Date.now();
+    }
+
+    sock.on('data', (chunk) => {
+      if (!active) return;
+      try {
+        buf = Buffer.concat([buf, chunk]);
+
+        if (!parsedAudioHeader && buf.length >= 4) {
+          const codec = buf.subarray(0, 4).toString('utf8').replace(/\0/g, '');
+          console.log(`[StreamBridge] 🔊 Audio-only scrcpy ready [codec: ${codec || 'raw'}] for ${serial}`);
+          buf = buf.subarray(4);
+          parsedAudioHeader = true;
+        }
+
+        if (parsedAudioHeader) {
+          while (buf.length >= 12) {
+            const rawHeader = buf.readBigUInt64BE(0);
+            const isConfig = (rawHeader & 0x8000000000000000n) !== 0n;
+            const size = buf.readUInt32BE(8);
+            if (buf.length < 12 + size) break;
+
+            const audioData = buf.subarray(12, 12 + size);
+            buf = buf.subarray(12 + size);
+
+            if (isConfig || audioData.length === 0 || isPcmSilent(audioData)) continue;
+
+            audioBatch = Buffer.concat([audioBatch, audioData]);
+            const now = Date.now();
+            if (audioBatch.length >= 7680 || now - lastAudioFlush >= 35) {
+              flushAudio();
+            }
+          }
+        }
+      } catch (audioErr) {
+        console.warn('[Audio parser warning]', audioErr.message);
+      }
+    });
+
+    sock.on('error', (err) => console.warn(`[Audio] socket error for ${serial}:`, err.message));
+    sock.on('close', () => {
+      audioSock = null;
+      console.log(`[Audio] socket closed for ${serial}`);
+    });
+  }
+
+  // ─── PIPELINE 1: Video + Control (always rock-solid, audio=false) ───────────────
   (async () => {
     try {
-      // 1. Ensure scrcpy-server.jar is pushed to phone
+      // Push scrcpy-server.jar once
       if (scrcpyServerJarPath) {
         await execAdb(['-s', serial, 'push', scrcpyServerJarPath, '/data/local/tmp/scrcpy-server.jar']);
       }
 
-      // 2. Create local reverse TCP server on ephemeral port (avoids Win 10013 port conflicts)
+      // Ephemeral port + ADB reverse tunnel
       scid = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
       server = net.createServer();
       await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
       const port = server.address().port;
-
-      // 3. Set up ADB reverse tunnel
       await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${scid}`, `tcp:${port}`]);
 
-      // 4. Accept the 2 scrcpy sockets (Video -> Control) — audio=false so no audio socket
+      // Accept exactly 2 sockets: Video → Control
       server.on('connection', (sock) => {
-        if (!active) {
-          sock.destroy();
-          return;
-        }
-
+        if (!active) { sock.destroy(); return; }
         try { sock.setNoDelay(true); } catch (e) {}
-        sock.on('error', (err) => {
-          console.warn(`[StreamBridge] Socket error on ${serial}:`, err.message);
-        });
+        sock.on('error', (err) => console.warn(`[Video/Control] Socket error on ${serial}:`, err.message));
 
         if (!videoSock) {
           videoSock = sock;
           setupVideoSocket(sock);
         } else if (!controlSock) {
-          // With audio=false: second connection is always the control socket
           controlSock = sock;
           controlSockets.set(serial, sock);
-          console.log(`[StreamBridge] 🎮 Native Scrcpy Control channel active for ${serial} (instant no-delay)`);
+          console.log(`[StreamBridge] 🎮 Control channel active for ${serial}`);
         }
       });
 
-      server.on('error', (err) => {
-        console.error(`[StreamBridge] Server socket error for ${serial}:`, err.message);
-      });
+      server.on('error', (err) => console.error(`[StreamBridge] Video server error for ${serial}:`, err.message));
 
-      const AUD_PREFIX = Buffer.from('AUD:');
-      let cachedTargetDevId = '';
-      let targetDevIdBuf = Buffer.alloc(0);
-      function getTargetDevIdBuf(devId) {
-        if (devId !== cachedTargetDevId) {
-          cachedTargetDevId = devId;
-          targetDevIdBuf = Buffer.from(devId, 'utf8');
-        }
-        return targetDevIdBuf;
-      }
-
-      function setupVideoSocket(sock) {
-        let buf = Buffer.alloc(0);
-        let parsedHeader = false;
-
-        sock.on('data', (chunk) => {
-          if (!active) return;
-          buf = Buffer.concat([buf, chunk]);
-
-          if (!parsedHeader && buf.length >= 76) {
-            const deviceName = buf.subarray(0, 64).toString('utf8').replace(/\0/g, '');
-            const codec = buf.subarray(64, 68).toString('utf8');
-            const width = buf.readUInt32BE(68);
-            const height = buf.readUInt32BE(72);
-            deviceDimensions.set(serial, { width, height });
-            console.log(`[StreamBridge] 📱 Scrcpy Video Ready: ${deviceName} [${width}x${height}, ${codec}] (scrcpy selected screen)`);
-            buf = buf.subarray(76);
-            parsedHeader = true;
-
-            // Broadcast ground-truth scrcpy screen dimensions to cloud backend & viewers
-            if (ws && ws.readyState === 1) {
-              const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-              try {
-                ws.send(JSON.stringify({
-                  type: 'device-dimensions',
-                  deviceId: targetDevId,
-                  serial,
-                  width,
-                  height,
-                }));
-              } catch (e) {}
-            }
-          }
-
-          if (parsedHeader) {
-            while (buf.length >= 12) {
-              const rawHeader = buf.readBigUInt64BE(0);
-              const size = buf.readUInt32BE(8);
-
-              if (buf.length < 12 + size) {
-                break; // Wait for full frame
-              }
-
-              const isConfig = (rawHeader & 0x8000000000000000n) !== 0n;
-              const isKeyframe = (rawHeader & 0x4000000000000000n) !== 0n;
-              const packetData = buf.subarray(12, 12 + size);
-              buf = buf.subarray(12 + size);
-
-              if (isConfig) {
-                cachedConfig = packetData;
-              } else if (isKeyframe) {
-                const fullKeyframe = cachedConfig ? Buffer.concat([cachedConfig, packetData]) : packetData;
-                cachedKeyframes.set(serial, fullKeyframe);
-
-                if (ws && ws.readyState === 1) {
-                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-                  if (targetDevId) {
-                    try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), fullKeyframe])); } catch (e) {}
-                  }
-                }
-                framesSent++;
-              } else {
-                // Delta frames: stream smoothly up to 2MB buffer, recover with instant keyframe if congested
-                if (ws && ws.readyState === 1) {
-                  if (ws.bufferedAmount <= 2 * 1024 * 1024) {
-                    const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-                    if (targetDevId) {
-                      try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), packetData])); } catch (e) {}
-                    }
-                    framesSent++;
-                  } else {
-                    // Backpressure: request fresh keyframe from scrcpy to cleanly resume once drained
-                    const ctrl = controlSockets.get(serial);
-                    if (ctrl && !ctrl.destroyed) {
-                      try { ctrl.write(Buffer.from([17])); } catch (e) {}
-                    }
-                  }
-                }
-              }
-
-              const now = Date.now();
-              if (now - lastStatsTime >= 3000) {
-                const fps = Math.round((framesSent * 1000) / (now - lastStatsTime));
-                console.log(`[Stream] ⚡ scrcpy hardware stream: ~${fps} FPS | ${serial}`);
-                framesSent = 0;
-                lastStatsTime = now;
-              }
-            }
-          }
-        });
-
-        sock.on('error', () => {});
-        sock.on('close', () => {
-          if (active) setTimeout(() => startStream(deviceId, serial), 1000);
-        });
-      }
-
-      function setupAudioSocket(sock) {
-        let buf = Buffer.alloc(0);
-        let parsedAudioHeader = false;
-        let audioBatch = Buffer.alloc(0);
-        let lastAudioFlush = Date.now();
-
-        function isPcmSilent(pcm) {
-          for (let i = 0; i < pcm.length; i += 8) {
-            if (pcm[i] !== 0 || pcm[i + 1] !== 0) return false;
-          }
-          return true;
-        }
-
-        function flushAudio() {
-          if (audioBatch.length === 0) return;
-          if (ws && ws.readyState === 1 && ws.bufferedAmount <= 128 * 1024) {
-            const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-            if (targetDevId) {
-              try {
-                ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), AUD_PREFIX, audioBatch]));
-              } catch (e) {}
-            }
-          }
-          audioBatch = Buffer.alloc(0);
-          lastAudioFlush = Date.now();
-        }
-
-        sock.on('data', (chunk) => {
-          if (!active) return;
-          try {
-            buf = Buffer.concat([buf, chunk]);
-
-            if (!parsedAudioHeader && buf.length >= 4) {
-              const codec = buf.subarray(0, 4).toString('utf8').replace(/\0/g, '');
-              console.log(`[StreamBridge] 🔊 Scrcpy Audio Ready [codec: ${codec || 'raw'}]`);
-              buf = buf.subarray(4);
-              parsedAudioHeader = true;
-            }
-
-            if (parsedAudioHeader) {
-              while (buf.length >= 12) {
-                const rawHeader = buf.readBigUInt64BE(0);
-                const isConfig = (rawHeader & 0x8000000000000000n) !== 0n;
-                const size = buf.readUInt32BE(8);
-
-                if (buf.length < 12 + size) {
-                  break; // Wait for full packet
-                }
-
-                const audioData = buf.subarray(12, 12 + size);
-                buf = buf.subarray(12 + size);
-
-                // Skip config packets or silent packets (zeros) to prevent flooding cloud websocket
-                if (isConfig || audioData.length === 0 || isPcmSilent(audioData)) continue;
-
-                // Batch active audio chunks into 35ms packets for instant, crisp real-time playback
-                audioBatch = Buffer.concat([audioBatch, audioData]);
-                const now = Date.now();
-                if (audioBatch.length >= 7680 || now - lastAudioFlush >= 35) {
-                  flushAudio();
-                }
-              }
-            }
-          } catch (audioErr) {
-            console.warn('[Audio parser warning]', audioErr.message);
-          }
-        });
-
-        sock.on('error', (err) => {
-          console.warn(`[Audio] socket error for ${serial}:`, err.message);
-        });
-
-        sock.on('close', () => {
-          console.log(`[Audio] socket closed for ${serial}`);
-          audioSock = null;
-        });
-      }
-
-      // 5. Spawn scrcpy-server with ultra-low latency profile
-      // audio=false: keeps scrcpy stable (audio=true with audio_source=playback can crash on many devices)
-      // This means scrcpy only opens 2 sockets: Video -> Control (no audio socket in between)
-      const scrcpyServerArgs = [
-        '-s', serial,
-        'shell',
+      // Scrcpy: video + control ONLY — zero audio risk
+      scrcpyProc = spawn(adbPath, [
+        '-s', serial, 'shell',
         'CLASSPATH=/data/local/tmp/scrcpy-server.jar',
         'app_process', '/', 'com.genymobile.scrcpy.Server',
         '3.3.4',
@@ -913,38 +888,123 @@ function startStream(deviceId, targetSerial) {
         'audio=false',
         'video_codec_options=low-latency:int=1',
         'downsize_on_error=true',
-      ];
-      scrcpyProc = spawn(adbPath, scrcpyServerArgs);
+      ]);
 
       scrcpyProc.stdout.on('data', (d) => {
         const text = d.toString().trim();
         if (text.includes('Device:') || text.includes('ERROR') || text.includes('WARN')) {
-          console.log('[scrcpy]', text);
+          console.log('[scrcpy-video]', text);
         }
       });
-
       scrcpyProc.stderr.on('data', (d) => {
         const text = d.toString().trim();
-        if (text) console.warn('[scrcpy err]', text);
+        if (text) console.warn('[scrcpy-video err]', text);
       });
-
-      scrcpyProc.on('error', (err) => {
-        console.error(`[StreamBridge] scrcpy process error for ${serial}:`, err.message);
-      });
-
+      scrcpyProc.on('error', (err) => console.error(`[StreamBridge] Video scrcpy error for ${serial}:`, err.message));
       scrcpyProc.on('exit', (code) => {
-        console.warn(`[StreamBridge] scrcpy process exited for ${serial} (code: ${code}). Auto-recovering in 1s...`);
+        console.warn(`[StreamBridge] Video scrcpy exited for ${serial} (code: ${code}). Restarting in 1s...`);
         if (active) {
           activeStreams.delete(serial);
           setTimeout(() => startStream(deviceId, serial), 1000);
         }
       });
+
+      // ─── PIPELINE 2: Audio-only (completely independent, crash-safe) ───────────
+      // Delay 2s so video+control is fully connected before audio starts
+      setTimeout(() => startAudioPipeline(), 2000);
+
     } catch (err) {
-      console.error(`[StreamBridge] Pure scrcpy pipeline error for ${serial}:`, err.message);
+      console.error(`[StreamBridge] Video pipeline error for ${serial}:`, err.message);
       activeStreams.delete(serial);
       if (active) setTimeout(() => startStream(deviceId, serial), 2000);
     }
   })();
+
+  // ─── Audio pipeline — runs entirely independently of video ─────────────────────
+  // If audio fails or crashes, video+control keep running without interruption.
+  function startAudioPipeline() {
+    if (!active) return;
+
+    // Clean up any previous audio process/server
+    if (audioProc) { try { audioProc.kill(); } catch (e) {} audioProc = null; }
+    if (audioServer) { try { audioServer.close(); } catch (e) {} audioServer = null; }
+    if (audioSock) { try { audioSock.destroy(); } catch (e) {} audioSock = null; }
+    if (audioScid) {
+      execFile(adbPath, ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${audioScid}`], () => {});
+    }
+
+    (async () => {
+      try {
+        // Separate scid so it never conflicts with the video tunnel
+        audioScid = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
+        audioServer = net.createServer();
+        await new Promise((resolve) => audioServer.listen(0, '127.0.0.1', resolve));
+        const audioPort = audioServer.address().port;
+        await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${audioScid}`, `tcp:${audioPort}`]);
+
+        console.log(`[StreamBridge] 🎵 Starting audio-only scrcpy pipeline for ${serial}...`);
+
+        // Accept exactly 1 socket: Audio only (video=false → no video socket, control=false → no control socket)
+        audioServer.on('connection', (sock) => {
+          if (!active) { sock.destroy(); return; }
+          try { sock.setNoDelay(true); } catch (e) {}
+          if (!audioSock) {
+            audioSock = sock;
+            setupAudioSocket(sock);
+          } else {
+            sock.destroy(); // unexpected extra connection
+          }
+        });
+
+        audioServer.on('error', (err) => {
+          console.warn(`[Audio] Server error for ${serial}:`, err.message);
+        });
+
+        // audio-only scrcpy: video=false, control=false → opens exactly 1 socket (audio)
+        audioProc = spawn(adbPath, [
+          '-s', serial, 'shell',
+          'CLASSPATH=/data/local/tmp/scrcpy-server.jar',
+          'app_process', '/', 'com.genymobile.scrcpy.Server',
+          '3.3.4',
+          `scid=${audioScid}`,
+          'log_level=warn',
+          'cleanup=false',
+          'video=false',
+          'audio=true',
+          'audio_codec=raw',
+          'audio_source=playback',
+          'audio_dup=true',
+          'control=false',
+        ]);
+
+        audioProc.stdout.on('data', (d) => {
+          const text = d.toString().trim();
+          if (text.includes('ERROR')) console.warn('[scrcpy-audio]', text);
+        });
+        audioProc.stderr.on('data', (d) => {
+          const text = d.toString().trim();
+          if (text && !text.includes('INFO')) console.warn('[scrcpy-audio err]', text);
+        });
+        audioProc.on('error', (err) => {
+          console.warn(`[Audio] scrcpy-audio error for ${serial}:`, err.message);
+        });
+        audioProc.on('exit', (code) => {
+          audioProc = null;
+          audioSock = null;
+          if (active) {
+            // Audio crashed → retry after 5s without touching video
+            console.warn(`[Audio] scrcpy-audio exited (code: ${code}) for ${serial}. Retrying audio in 5s...`);
+            setTimeout(() => startAudioPipeline(), 5000);
+          }
+        });
+
+      } catch (audioErr) {
+        // Audio pipeline failed to start → retry quietly, video is unaffected
+        console.warn(`[Audio] Pipeline start failed for ${serial}: ${audioErr.message}. Retrying in 8s...`);
+        if (active) setTimeout(() => startAudioPipeline(), 8000);
+      }
+    })();
+  }
 }
 
 function stopStream(deviceId) {
