@@ -13,6 +13,7 @@ interface ClientSession {
   agentId?: string;
   organizationId: string;
   deviceId?: string;
+  deviceIds?: Set<string>;
   canControl: boolean;
   canView: boolean;
 }
@@ -181,6 +182,7 @@ export class SignalingServer {
   }
 
   private handleAgentConnection(session: ClientSession) {
+    session.deviceIds = new Set<string>();
     this.connectedAgents.add(session);
     console.log(`[SignalingServer] Agent connected: ${session.agentId} (Org: ${session.organizationId})`);
 
@@ -199,60 +201,31 @@ export class SignalingServer {
             videoPayload = buf.subarray(36);
           }
 
+          if (!targetDeviceId && session.deviceIds && session.deviceIds.size === 1) {
+            targetDeviceId = session.deviceIds.values().next().value || null;
+          }
+
+          if (!targetDeviceId) return;
+
           // Detect SPS / PPS keyframe config headers
           const isConfig = (videoPayload.length >= 5 &&
             ((videoPayload[0] === 0x00 && videoPayload[1] === 0x00 && videoPayload[2] === 0x00 && videoPayload[3] === 0x01 && (videoPayload[4] & 0x1f) === 7) ||
              (videoPayload[0] === 0x00 && videoPayload[1] === 0x00 && videoPayload[2] === 0x01 && (videoPayload[3] & 0x1f) === 7)));
 
-          // Find serial associated with targetDeviceId
-          const dev = targetDeviceId ? inMemoryDb.devices.get(targetDeviceId) : null;
-          const serial = dev ? dev.adb_serial : '';
+          const targetRoom = this.getRoom(targetDeviceId);
+          targetRoom.agent = session;
+          if (isConfig) {
+            targetRoom.lastHeader = videoPayload;
+          }
 
-          let forwarded = 0;
-          const targetRoom = targetDeviceId ? this.deviceRooms.get(targetDeviceId) : null;
-          if (targetRoom && targetRoom.viewers.size > 0) {
-            // Producer exclusivity: only forward frames from the room's designated active agent!
-            if (targetRoom.agent && targetRoom.agent !== session) {
-              return; // Drop duplicate frames from superseded or rogue secondary agent session
-            }
-            targetRoom.agent = session;
-            if (isConfig) {
-              targetRoom.lastHeader = videoPayload;
-            }
+          // Strict isolated routing: Deliver ONLY to viewers watching THIS target device!
+          if (targetRoom.viewers.size > 0) {
+            const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
             for (const viewer of targetRoom.viewers) {
               if (viewer.ws.readyState === WebSocket.OPEN) {
-                // Strict 128KB buffer ceiling: guarantees viewer never accumulates more than ~100ms latency
-                const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
                 if (isAudio && viewer.ws.bufferedAmount > 64 * 1024) continue;
                 if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
                 viewer.ws.send(videoPayload);
-                forwarded++;
-              }
-            }
-          } else {
-            // Forward once to active room matching the device serial (never duplicate)
-            for (const [rDevId, r] of this.deviceRooms.entries()) {
-              if (r.viewers.size === 0) continue;
-              const rDev = inMemoryDb.devices.get(rDevId);
-              const matches = (rDevId === targetDeviceId) || (serial && rDev && rDev.adb_serial === serial);
-              if (matches) {
-                if (r.agent && r.agent !== session) {
-                  return; // Drop duplicate frames from superseded or rogue secondary agent session
-                }
-                r.agent = session;
-                if (isConfig) {
-                  r.lastHeader = videoPayload;
-                }
-                for (const viewer of r.viewers) {
-                  if (viewer.ws.readyState === WebSocket.OPEN) {
-                    const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
-                    if (isAudio && viewer.ws.bufferedAmount > 64 * 1024) continue;
-                    if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
-                    viewer.ws.send(videoPayload);
-                    forwarded++;
-                  }
-                }
-                break; // Exactly one room delivered; prevents multiplication loops!
               }
             }
           }
@@ -266,11 +239,10 @@ export class SignalingServer {
             // Agent registers as producer for deviceId
             const deviceId = msg.deviceId;
             session.deviceId = deviceId;
-            const room = this.getRoom(deviceId);
-            if (room.agent && room.agent !== session && room.agent.ws.readyState === WebSocket.OPEN) {
-              console.log(`[SignalingServer] Superseding older agent connection for device ${deviceId}`);
-              try { room.agent.ws.close(4009, 'Superseded by newer agent session'); } catch (e) {}
+            if (session.deviceIds) {
+              session.deviceIds.add(deviceId);
             }
+            const room = this.getRoom(deviceId);
             room.agent = session;
             DeviceService.updateStatus(deviceId, 'online');
             session.ws.send(JSON.stringify({ type: 'registered', deviceId, success: true }));
@@ -302,9 +274,9 @@ export class SignalingServer {
           case 'webrtc-offer':
           case 'webrtc-answer':
           case 'ice-candidate': {
-            // Forward WebRTC signaling to viewers
-            if (session.deviceId) {
-              const room = this.getRoom(session.deviceId);
+            const devId = msg.deviceId || session.deviceId;
+            if (devId) {
+              const room = this.getRoom(devId);
               for (const viewer of room.viewers) {
                 if (viewer.ws.readyState === WebSocket.OPEN) {
                   viewer.ws.send(JSON.stringify(msg));
@@ -315,9 +287,9 @@ export class SignalingServer {
           }
 
           case 'stream-metrics': {
-            // Device screen resolution, FPS, bitrate updates
-            if (session.deviceId) {
-              const room = this.getRoom(session.deviceId);
+            const devId = msg.deviceId || session.deviceId;
+            if (devId) {
+              const room = this.getRoom(devId);
               for (const viewer of room.viewers) {
                 if (viewer.ws.readyState === WebSocket.OPEN) {
                   viewer.ws.send(JSON.stringify(msg));
@@ -367,12 +339,11 @@ export class SignalingServer {
     session.ws.on('close', () => {
       this.connectedAgents.delete(session);
       console.log(`[SignalingServer] Agent disconnected: ${session.agentId}`);
-      if (session.deviceId) {
-        const devId = session.deviceId;
-        const room = this.getRoom(devId);
-        if (room.agent === session) {
+      const devIdsToClean = session.deviceIds ? Array.from(session.deviceIds) : (session.deviceId ? [session.deviceId] : []);
+      for (const devId of devIdsToClean) {
+        const room = this.deviceRooms.get(devId);
+        if (room && room.agent === session) {
           room.agent = undefined;
-          // Grace period: allow 5s for agent reconnection before declaring device offline
           setTimeout(() => {
             const currentRoom = this.deviceRooms.get(devId);
             if (currentRoom && (!currentRoom.agent || currentRoom.agent.ws.readyState !== WebSocket.OPEN)) {

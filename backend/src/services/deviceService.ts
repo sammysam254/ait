@@ -64,12 +64,12 @@ export class DeviceService {
           break;
         }
       }
-      // 2. Fallback: If device ID is stale from an older container session, alias to active device in tenant
+      // 2. Fallback: Only alias if there is EXACTLY ONE device in the tenant (avoids cross-device collisions when multiple phones exist)
       if (!device) {
         const orgDevices = Array.from(inMemoryDb.devices.values()).filter(d =>
           user.system_role === 'admin' || d.organization_id === user.organizationId
         );
-        if (orgDevices.length > 0) {
+        if (orgDevices.length === 1) {
           device = orgDevices[0];
         }
       }

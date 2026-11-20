@@ -611,6 +611,33 @@ let serialToDeviceIds = new Map(); // serial -> Set<deviceId>
 let serialToActiveDeviceId = new Map(); // serial -> active streaming deviceId
 let activeStreams = new Map();     // serial -> { stop, serial }
 let cachedKeyframes = new Map();   // serial -> Buffer
+
+// Dedicated per-device port allocation
+// Each phone gets its own deterministic, conflict-free local TCP ports for scrcpy and audio
+const allocatedDevicePorts = new Map(); // serial -> { videoPort: number, audioPort: number, scid: string, audioScid: string }
+let nextAvailablePort = 28100;
+
+function getDevicePorts(serial) {
+  if (!allocatedDevicePorts.has(serial)) {
+    let hash = 0;
+    for (let i = 0; i < serial.length; i++) {
+      hash = ((hash << 5) - hash + serial.charCodeAt(i)) & 0x7fffffff;
+    }
+    const scid = Math.abs(hash).toString(16).padStart(8, '0');
+    const audioScid = Math.abs((hash ^ 0x5a5a5a5a) & 0x7fffffff).toString(16).padStart(8, '0');
+
+    const videoPort = nextAvailablePort;
+    const audioPort = nextAvailablePort + 1;
+    nextAvailablePort += 2;
+
+    allocatedDevicePorts.set(serial, { videoPort, audioPort, scid, audioScid });
+  }
+  return allocatedDevicePorts.get(serial);
+}
+
+function getTargetDevIdBuf(devId) {
+  return Buffer.from(devId || '', 'utf8');
+}
 let ws = null;
 let isReconnecting = false;
 let lastActivityTime = Date.now();
@@ -738,11 +765,12 @@ async function handleMessage(msg) {
     case 'start-stream':
     case 'request-stream': {
       const { deviceId, serial } = msg;
-      const targetSerial = serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || (activeStreams.keys().next().value) || '';
+      const targetSerial = serial || (deviceId ? deviceIdToSerial.get(deviceId) : null) || (deviceId ? registeredDevices.get(deviceId) : null) || '';
       console.log(`[StreamBridge] 📺 Received stream request for device: ${deviceId} (${targetSerial})`);
       if (targetSerial) {
         if (deviceId) {
           serialToActiveDeviceId.set(targetSerial, deviceId);
+          deviceIdToSerial.set(deviceId, targetSerial);
         }
         // Force scrcpy to produce an immediate fresh IDR keyframe and config packet
         const ctrl = controlSockets.get(targetSerial);
@@ -752,7 +780,7 @@ async function handleMessage(msg) {
         const cached = cachedKeyframes.get(targetSerial);
         if (cached && ws && ws.readyState === 1) {
           const targetDevId = serialToActiveDeviceId.get(targetSerial) || deviceId;
-          try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), cached])); } catch (e) {}
+          try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), cached])); } catch (e) {}
         }
         startStream(deviceId, targetSerial);
       }
@@ -762,7 +790,7 @@ async function handleMessage(msg) {
     case 'refresh-stream':
     case 'request-keyframe': {
       const { deviceId, serial } = msg;
-      const targetSerial = serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || (activeStreams.keys().next().value) || '';
+      const targetSerial = serial || (deviceId ? deviceIdToSerial.get(deviceId) : null) || (deviceId ? registeredDevices.get(deviceId) : null) || '';
       if (targetSerial) {
         const ctrl = controlSockets.get(targetSerial);
         if (ctrl && !ctrl.destroyed) {
@@ -771,7 +799,7 @@ async function handleMessage(msg) {
         const cached = cachedKeyframes.get(targetSerial);
         if (cached && ws && ws.readyState === 1) {
           const targetDevId = serialToActiveDeviceId.get(targetSerial) || deviceId;
-          try { ws.send(Buffer.concat([Buffer.from(targetDevId, 'utf8'), cached])); } catch (e) {}
+          try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), cached])); } catch (e) {}
         }
       }
       break;
@@ -798,7 +826,7 @@ async function handleMessage(msg) {
 
     case 'control-input': {
       const { deviceId, action, data } = msg;
-      const serial = msg.serial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || (activeStreams.keys().next().value) || (shellSessions.keys().next().value) || '';
+      const serial = msg.serial || (deviceId ? deviceIdToSerial.get(deviceId) : null) || (deviceId ? registeredDevices.get(deviceId) : null) || '';
       if (serial) {
         await injectInput(serial, action, data);
       }
@@ -808,7 +836,7 @@ async function handleMessage(msg) {
 }
 
 function startStream(deviceId, targetSerial) {
-  const serial = targetSerial || deviceIdToSerial.get(deviceId) || registeredDevices.get(deviceId) || (activeStreams.keys().next().value) || '';
+  const serial = targetSerial || (deviceId ? deviceIdToSerial.get(deviceId) : null) || (deviceId ? registeredDevices.get(deviceId) : null) || '';
   if (!serial) {
     console.warn(`[StreamBridge] Cannot start stream for ${deviceId}: no serial mapped.`);
     return;
@@ -848,14 +876,17 @@ function startStream(deviceId, targetSerial) {
   let framesSent = 0;
   let lastStatsTime = Date.now();
   let cachedConfig = null;
-  let scid = '';
-  let audioScid = '';
+
+  // Dedicated conflict-free ports and abstract socket names
+  const ports = getDevicePorts(serial);
+  const scid = ports.scid;
+  const audioScid = ports.audioScid;
 
   const streamObj = {
     stop: () => {
       active = false;
       activeStreams.delete(serial);
-      if (controlSock) { controlSock.destroy(); controlSockets.delete(serial); }
+      if (controlSock) { controlSock.destroy(); controlSockets.delete(serial); controlSockets.delete(deviceId); }
       if (videoSock) { try { videoSock.destroy(); } catch (e) {} }
       if (audioSock) { try { audioSock.destroy(); } catch (e) {} }
       if (server) { try { server.close(); } catch (e) {} }
@@ -900,6 +931,7 @@ function startStream(deviceId, targetSerial) {
         const width = buf.readUInt32BE(68);
         const height = buf.readUInt32BE(72);
         deviceDimensions.set(serial, { width, height });
+        if (deviceId) deviceDimensions.set(deviceId, { width, height });
         console.log(`[StreamBridge] 📱 Scrcpy Video Ready: ${deviceName} [${width}x${height}, ${codec}]`);
         buf = buf.subarray(76);
         parsedHeader = true;
@@ -928,6 +960,7 @@ function startStream(deviceId, targetSerial) {
           } else if (isKeyframe) {
             const fullKeyframe = cachedConfig ? Buffer.concat([cachedConfig, packetData]) : packetData;
             cachedKeyframes.set(serial, fullKeyframe);
+            if (deviceId) cachedKeyframes.set(deviceId, fullKeyframe);
             if (ws && ws.readyState === 1) {
               const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
               if (targetDevId) {
@@ -1046,12 +1079,21 @@ function startStream(deviceId, targetSerial) {
         await execAdb(['-s', serial, 'push', scrcpyServerJarPath, '/data/local/tmp/scrcpy-server.jar']);
       }
 
-      // Ephemeral port + ADB reverse tunnel (scid must be <= 0x7fffffff to avoid Java Integer.parseInt overflow)
-      scid = Math.floor(Math.random() * 0x7fffffff).toString(16).padStart(8, '0');
+      // Dedicated per-device port and ADB reverse tunnel
+      try {
+        await execAdb(['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${scid}`]);
+      } catch (e) {}
+
       server = net.createServer();
-      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const port = server.address().port;
-      await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${scid}`, `tcp:${port}`]);
+      await new Promise((resolve) => {
+        server.listen(ports.videoPort, '127.0.0.1', () => resolve());
+        server.once('error', (err) => {
+          console.warn(`[StreamBridge] Video port ${ports.videoPort} busy for ${serial}, using fallback:`, err.message);
+          server.listen(0, '127.0.0.1', () => resolve());
+        });
+      });
+      const boundVideoPort = server.address().port;
+      await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${scid}`, `tcp:${boundVideoPort}`]);
 
       // Accept exactly 2 sockets: Video → Control
       server.on('connection', (sock) => {
@@ -1065,7 +1107,8 @@ function startStream(deviceId, targetSerial) {
         } else if (!controlSock) {
           controlSock = sock;
           controlSockets.set(serial, sock);
-          console.log(`[StreamBridge] 🎮 Control channel active for ${serial}`);
+          if (deviceId) controlSockets.set(deviceId, sock);
+          console.log(`[StreamBridge] 🎮 Control channel active for ${serial} (Device ID: ${deviceId})`);
         }
       });
 
@@ -1135,12 +1178,20 @@ function startStream(deviceId, targetSerial) {
 
     (async () => {
       try {
-        // Separate scid (<= 0x7fffffff to avoid Java Integer.parseInt overflow)
-        audioScid = Math.floor(Math.random() * 0x7fffffff).toString(16).padStart(8, '0');
+        try {
+          await execAdb(['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${audioScid}`]);
+        } catch (e) {}
+
         audioServer = net.createServer();
-        await new Promise((resolve) => audioServer.listen(0, '127.0.0.1', resolve));
-        const audioPort = audioServer.address().port;
-        await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${audioScid}`, `tcp:${audioPort}`]);
+        await new Promise((resolve) => {
+          audioServer.listen(ports.audioPort, '127.0.0.1', () => resolve());
+          audioServer.once('error', (err) => {
+            console.warn(`[Audio] Audio port ${ports.audioPort} busy for ${serial}, using fallback:`, err.message);
+            audioServer.listen(0, '127.0.0.1', () => resolve());
+          });
+        });
+        const boundAudioPort = audioServer.address().port;
+        await execAdb(['-s', serial, 'reverse', `localabstract:scrcpy_${audioScid}`, `tcp:${boundAudioPort}`]);
 
         console.log(`[StreamBridge] 🎵 Starting audio-only scrcpy pipeline for ${serial}...`);
 
