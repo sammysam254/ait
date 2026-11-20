@@ -600,23 +600,24 @@ export const DeviceViewerPage: React.FC = () => {
       if (!canControl) return;
 
       const now = performance.now();
-      // Debounce wheel: 1 clean flick per 350ms to prevent fighting gestures in feeds
-      if (now - lastWheelTimeRef.current < 350) return;
+      // Fast, natural wheel response (140ms debounce) for smooth list and feed scrolling
+      if (now - lastWheelTimeRef.current < 140) return;
       lastWheelTimeRef.current = now;
 
       const isDown = e.deltaY > 0;
       const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
       const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
       const midX = Math.round(deviceWidth / 2);
-      const startY = isDown ? Math.round(deviceHeight * 0.75) : Math.round(deviceHeight * 0.25);
-      const endY = isDown ? Math.round(deviceHeight * 0.20) : Math.round(deviceHeight * 0.80);
+      // Realistic human flick stroke
+      const startY = isDown ? Math.round(deviceHeight * 0.72) : Math.round(deviceHeight * 0.28);
+      const endY = isDown ? Math.round(deviceHeight * 0.25) : Math.round(deviceHeight * 0.75);
 
       sendInput('swipe', {
         startX: midX,
         startY,
         endX: midX,
         endY,
-        durationMs: 100,
+        durationMs: 80,
       });
     };
 
@@ -889,7 +890,7 @@ export const DeviceViewerPage: React.FC = () => {
       )}
 
       {/* Screen Viewer Centerpiece: Dynamic aspect ratio decided by active scrcpy stream */}
-      <div className="flex-1 flex flex-col items-center justify-center p-2 relative min-h-0">
+      <div className="flex-1 flex flex-col items-center justify-center p-0 md:p-2 relative min-h-0 w-full overflow-hidden">
         <div
           style={{
             aspectRatio: (videoRef.current?.videoWidth && videoRef.current?.videoHeight)
@@ -900,7 +901,7 @@ export const DeviceViewerPage: React.FC = () => {
               ? `${device.screen_width} / ${device.screen_height}`
               : '9 / 19.5',
           }}
-          className="relative max-h-[75vh] max-w-full rounded-3xl bg-black border-4 border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center transition-all duration-300"
+          className="relative h-full max-h-[calc(100vh-140px)] w-auto max-w-full rounded-2xl md:rounded-3xl bg-black border-2 md:border-4 border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center transition-all duration-200"
         >
           {/* Hardware Accelerated ws-scrcpy Video Player */}
           <video

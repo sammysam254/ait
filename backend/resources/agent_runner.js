@@ -348,7 +348,7 @@ async function injectInput(serial, action, data) {
             if (s && !s.destroyed) {
               sendScrcpyTouch(s, 1, x, y, targetW, targetH);
             }
-          }, 35);
+          }, 25);
           return true;
         case 'text':
           if (data && data.text) {
@@ -365,30 +365,31 @@ async function injectInput(serial, action, data) {
           const sy = scaleY(data.startY);
           const ex = scaleX(data.endX);
           const ey = scaleY(data.endY);
-          const mx = Math.round((sx + ex) / 2);
-          const my = Math.round((sy + ey) / 2);
+          const steps = 6;
+          const duration = Math.min(120, Math.max(50, data.durationMs || 80));
+          const interval = Math.floor(duration / steps);
 
-          sendScrcpyTouch(sock, 0, sx, sy, targetW, targetH);
-          setTimeout(() => {
-            if (controlSockets.has(serial)) {
+          // Human-like ease-out bezier curve: starts fast, accelerates smoothly, decelerates into fling
+          sendScrcpyTouch(sock, 0, sx, sy, targetW, targetH); // ACTION_DOWN
+
+          for (let i = 1; i <= steps; i++) {
+            const t = i / steps;
+            const ease = 1 - Math.pow(1 - t, 3); // Cubic ease-out
+            const curX = Math.round(sx + (ex - sx) * ease);
+            const curY = Math.round(sy + (ey - sy) * ease);
+
+            setTimeout(() => {
               const s = controlSockets.get(serial);
-              sendScrcpyTouch(s, 2, mx, my, targetW, targetH);
-              setTimeout(() => {
-                if (controlSockets.has(serial)) {
-                  const s2 = controlSockets.get(serial);
-                  sendScrcpyTouch(s2, 2, ex, ey, targetW, targetH);
-                  sendScrcpyTouch(s2, 1, ex, ey, targetW, targetH);
-                  // Refresh settled frame after swipe completes
-                  setTimeout(() => {
-                    const ctrl = controlSockets.get(serial);
-                    if (ctrl && !ctrl.destroyed) {
-                      try { ctrl.write(Buffer.from([17])); } catch (e) {}
-                    }
-                  }, 180);
+              if (s && !s.destroyed) {
+                if (i < steps) {
+                  sendScrcpyTouch(s, 2, curX, curY, targetW, targetH); // ACTION_MOVE
+                } else {
+                  sendScrcpyTouch(s, 2, ex, ey, targetW, targetH); // Final position
+                  sendScrcpyTouch(s, 1, ex, ey, targetW, targetH); // ACTION_UP with natural inertia
                 }
-              }, 30);
-            }
-          }, 30);
+              }
+            }, i * interval);
+          }
           return true;
         }
         case 'back':
@@ -879,8 +880,7 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'max_size=960',
-        'video_bit_rate=2000000',
+        'video_bit_rate=2500000',
         'max_fps=60',
         'stay_awake=true',
         'control=true',
