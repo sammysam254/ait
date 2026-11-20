@@ -8,15 +8,27 @@ export class AssignmentService {
   /**
    * List subordinate assigned users for the organization, including their assigned device count
    */
-  static listAssignedUsers(organizationId: string): Array<AssignedUser & { assignedDevicesCount: number; assignedDevices: any[] }> {
+  static listAssignedUsers(organizationId: string, user?: any): Array<AssignedUser & { assignedDevicesCount: number; assignedDevices: any[] }> {
     return Array.from(inMemoryDb.assignedUsers.values())
-      .filter(au => au.organization_id === organizationId)
+      .filter(au => {
+        if (!user || user.system_role === 'admin') return true;
+        return (
+          au.organization_id === organizationId ||
+          au.invited_by === user.id ||
+          au.organization_id.includes(user.id) ||
+          (user.organizationId && au.organization_id === user.organizationId)
+        );
+      })
       .map(au => {
         const userAssignments = Array.from(inMemoryDb.deviceAssignments.values())
-          .filter(da => (da.assigned_user_id === au.user_id || da.assigned_user_id === au.email.toLowerCase()) && da.organization_id === organizationId);
+          .filter(da => (
+            da.assigned_user_id === au.user_id ||
+            da.assigned_user_id.toLowerCase().trim() === au.email.toLowerCase().trim() ||
+            da.assigned_user_id === au.id
+          ));
         
         const assignedDevices = userAssignments.map(da => {
-          const dev = inMemoryDb.devices.get(da.device_id);
+          const dev = inMemoryDb.devices.get(da.device_id) || Array.from(inMemoryDb.devices.values()).find(d => d.adb_serial === da.device_id);
           return {
             assignmentId: da.id,
             deviceId: da.device_id,
@@ -349,6 +361,7 @@ export class AssignmentService {
       created_at: new Date().toISOString(),
     });
 
+    inMemoryDb.save();
     return true;
   }
 
@@ -361,7 +374,10 @@ export class AssignmentService {
     let targetUser: AssignedUser | null = null;
 
     for (const [key, au] of inMemoryDb.assignedUsers.entries()) {
-      if (au.organization_id === organizationId && (au.id === assignedUserId || au.user_id === assignedUserId || au.email.toLowerCase() === assignedUserId.toLowerCase())) {
+      if (
+        (au.organization_id === organizationId || au.invited_by === revokedByUserId) &&
+        (au.id === assignedUserId || au.user_id === assignedUserId || au.email.toLowerCase() === assignedUserId.toLowerCase())
+      ) {
         targetAuKey = key;
         targetUser = au;
         break;
@@ -372,17 +388,19 @@ export class AssignmentService {
 
     // Delete all device assignments for this user
     for (const [key, da] of inMemoryDb.deviceAssignments.entries()) {
-      if (da.organization_id === organizationId &&
-          (da.assigned_user_id === targetUser.user_id ||
-           da.assigned_user_id.toLowerCase() === targetUser.email.toLowerCase() ||
-           da.assigned_user_id === targetUser.id)) {
+      if (
+        (da.organization_id === organizationId || da.organization_id === targetUser.organization_id) &&
+        (da.assigned_user_id === targetUser.user_id ||
+         da.assigned_user_id.toLowerCase() === targetUser.email.toLowerCase() ||
+         da.assigned_user_id === targetUser.id)
+      ) {
         inMemoryDb.deviceAssignments.delete(key);
       }
     }
 
     // Invalidate pending invitations
     for (const inv of inMemoryDb.invitations.values()) {
-      if (inv.organization_id === organizationId && inv.email.toLowerCase() === targetUser.email.toLowerCase()) {
+      if (inv.email.toLowerCase() === targetUser.email.toLowerCase()) {
         inv.status = 'expired';
       }
     }
@@ -402,6 +420,7 @@ export class AssignmentService {
       created_at: new Date().toISOString(),
     });
 
+    inMemoryDb.save();
     return true;
   }
 
@@ -415,24 +434,28 @@ export class AssignmentService {
     userRole: string,
     userEmail?: string
   ): Promise<{ url: string; pin: string } | null> {
+    const dev = inMemoryDb.devices.get(deviceId) || Array.from(inMemoryDb.devices.values()).find(d => d.adb_serial === deviceId);
+    const resolvedDeviceId = dev ? dev.id : deviceId;
+
     // If assigned user, verify permissions
     if (userRole === 'assigned_user') {
+      const cleanEmail = (userEmail || '').toLowerCase().trim();
       const assignment = Array.from(inMemoryDb.deviceAssignments.values()).find(
-        da => da.device_id === deviceId &&
-              (da.assigned_user_id === userId || (userEmail && da.assigned_user_id === userEmail.toLowerCase())) &&
-              da.can_view
+        da => (da.device_id === resolvedDeviceId || (dev && da.device_id === dev.adb_serial)) &&
+              (da.assigned_user_id === userId || (cleanEmail && da.assigned_user_id.toLowerCase().trim() === cleanEmail)) &&
+              da.can_view !== false
       );
       if (!assignment) return null;
     }
 
     // Find active share or create one if none exists
-    let share = SharingService.getShareForDevice(deviceId, organizationId);
+    let share = SharingService.getShareForDevice(resolvedDeviceId, organizationId);
     let pin = share?.pin_preview;
 
     if (!share) {
-      const created = await SharingService.createShare(deviceId, organizationId, userId, {
+      const created = await SharingService.createShare(resolvedDeviceId, dev?.organization_id || organizationId, userId, {
         allowControl: true,
-        expirationHours: 72,
+        expirationHours: 168,
       });
       share = created.share;
       pin = created.plainPin;

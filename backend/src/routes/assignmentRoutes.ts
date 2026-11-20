@@ -26,7 +26,7 @@ router.get('/users', authenticate, (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Only owners or admins can view assigned users list.' });
   }
 
-  const users = AssignmentService.listAssignedUsers(user.organizationId);
+  const users = AssignmentService.listAssignedUsers(user.organizationId, user);
   return res.json({ users });
 });
 

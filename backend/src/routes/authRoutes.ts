@@ -395,15 +395,25 @@ router.post('/register', (req: Request, res: Response) => {
 router.get('/me', authenticate, (req: Request, res: Response) => {
   const user = req.user!;
   const profile = inMemoryDb.profiles.get(user.id);
-  const organization = inMemoryDb.organizations.get(user.organizationId);
+  let organization = inMemoryDb.organizations.get(user.organizationId);
+
+  // If organization not found by direct ID, check assignedUsers records
+  if (!organization) {
+    const au = Array.from(inMemoryDb.assignedUsers.values()).find(
+      u => u.user_id === user.id || u.email.toLowerCase().trim() === user.email.toLowerCase().trim()
+    );
+    if (au) {
+      organization = inMemoryDb.organizations.get(au.organization_id);
+    }
+  }
 
   return res.json({
     user: {
       id: user.id,
       email: user.email,
-      fullName: profile?.full_name || '',
+      fullName: profile?.full_name || user.email.split('@')[0],
       role: user.system_role,
-      organizationId: user.organizationId,
+      organizationId: organization ? organization.id : user.organizationId,
       organizationName: organization?.name || 'Cloud Device Farm',
       plan: organization?.plan || 'starter',
     },

@@ -74,15 +74,22 @@ export class SharingService {
       created_at: new Date().toISOString(),
     });
 
+    inMemoryDb.save();
     return { share: newShare, plainPin };
   }
 
   /**
-   * Get active share for a device (owner only)
+   * Get active share for a device (owner or assigned worker)
    */
-  static getShareForDevice(deviceId: string, organizationId: string): DeviceShare | undefined {
+  static getShareForDevice(deviceId: string, organizationId?: string): DeviceShare | undefined {
+    const dev = inMemoryDb.devices.get(deviceId) || Array.from(inMemoryDb.devices.values()).find(d => d.adb_serial === deviceId);
+    const resolvedId = dev ? dev.id : deviceId;
+    const serial = dev ? dev.adb_serial : '';
+
     return Array.from(inMemoryDb.deviceShares.values()).find(
-      s => s.device_id === deviceId && s.organization_id === organizationId && !s.is_revoked
+      s => (s.device_id === resolvedId || (serial && s.device_id === serial)) &&
+           (!organizationId || s.organization_id === organizationId || (dev && s.organization_id === dev.organization_id)) &&
+           !s.is_revoked
     );
   }
 
@@ -112,6 +119,7 @@ export class SharingService {
       created_at: new Date().toISOString(),
     });
 
+    inMemoryDb.save();
     return { share, newPin };
   }
 
@@ -140,6 +148,7 @@ export class SharingService {
       created_at: new Date().toISOString(),
     });
 
+    inMemoryDb.save();
     return share;
   }
 
@@ -165,6 +174,7 @@ export class SharingService {
       created_at: new Date().toISOString(),
     });
 
+    inMemoryDb.save();
     return true;
   }
 

@@ -40,17 +40,16 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
     }
 
     const userId = decoded.id || decoded.sub;
-    const userEmail = (decoded.email || '').toLowerCase().trim();
+    const userEmail = (decoded.email || decoded.user_metadata?.email || '').toLowerCase().trim();
     const isSuperAdmin = userEmail === 'sammyseth260@gmail.com';
 
     // Check if this user is a subordinate worker in an organization
     const assignedUser = Array.from(inMemoryDb.assignedUsers.values()).find(
-      au => au.user_id === userId || au.email.toLowerCase() === userEmail
+      au => (userId && au.user_id === userId) || (userEmail && au.email.toLowerCase().trim() === userEmail)
     );
 
     let profile = inMemoryDb.profiles.get(userId);
     if (!profile) {
-      // Check if user was registered under assignedUsers with a different ID
       profile = {
         id: userId,
         email: userEmail,
@@ -60,20 +59,34 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
         updated_at: new Date().toISOString(),
       };
       inMemoryDb.profiles.set(userId, profile);
+      inMemoryDb.save();
     }
 
     if (assignedUser && !isSuperAdmin) {
       profile.system_role = 'assigned_user';
+      let stateChanged = false;
       if (assignedUser.user_id !== userId) {
+        const oldUserId = assignedUser.user_id;
         assignedUser.user_id = userId;
-      }
-      assignedUser.status = 'active';
-      // Relink device assignments to this userId
-      for (const da of inMemoryDb.deviceAssignments.values()) {
-        if (da.organization_id === assignedUser.organization_id &&
-            (da.assigned_user_id === userEmail || da.assigned_user_id === assignedUser.user_id)) {
-          da.assigned_user_id = userId;
+        stateChanged = true;
+        // Relink device assignments to this userId
+        for (const da of inMemoryDb.deviceAssignments.values()) {
+          if (
+            da.assigned_user_id === oldUserId ||
+            da.assigned_user_id === assignedUser.id ||
+            da.assigned_user_id.toLowerCase().trim() === userEmail
+          ) {
+            da.assigned_user_id = userId;
+            stateChanged = true;
+          }
         }
+      }
+      if (assignedUser.status !== 'active') {
+        assignedUser.status = 'active';
+        stateChanged = true;
+      }
+      if (stateChanged) {
+        inMemoryDb.save();
       }
     }
 

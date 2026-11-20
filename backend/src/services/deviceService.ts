@@ -38,7 +38,7 @@ export class DeviceService {
   private static getUserAssignments(user: AuthenticatedUser) {
     const userIdentifiers = this.getUserIdentifierSet(user);
     return Array.from(inMemoryDb.deviceAssignments.values()).filter(da => {
-      if (!da.can_view) return false;
+      if (da.can_view === false) return false;
       const target = (da.assigned_user_id || '').toLowerCase().trim();
       return userIdentifiers.has(target);
     });
@@ -66,9 +66,9 @@ export class DeviceService {
 
     // Devices explicitly assigned to this user
     const assignedDevices = allDevices
-      .filter(d => assignedMap.has(d.id))
+      .filter(d => assignedMap.has(d.id) || (d.adb_serial && assignedMap.has(d.adb_serial)))
       .map(d => {
-        const assignment = assignedMap.get(d.id)!;
+        const assignment = assignedMap.get(d.id) || assignedMap.get(d.adb_serial)!;
         return {
           ...d,
           permissions: {
@@ -78,6 +78,49 @@ export class DeviceService {
           }
         };
       });
+
+    // Ensure every assigned device appears in the worker's fleet (even if temporarily offline or syncing)
+    for (const [devId, assignment] of assignedMap.entries()) {
+      const alreadyInList = assignedDevices.some(d => d.id === devId || d.adb_serial === devId);
+      if (!alreadyInList) {
+        const found = allDevices.find(d => d.id === devId || d.adb_serial === devId);
+        if (found) {
+          assignedDevices.push({
+            ...found,
+            permissions: {
+              can_view: assignment.can_view ?? true,
+              can_control: assignment.can_control ?? false,
+              can_share: assignment.can_share ?? false,
+            }
+          });
+        } else {
+          assignedDevices.push({
+            id: devId,
+            organization_id: assignment.organization_id || user.organizationId,
+            agent_id: '',
+            adb_serial: devId,
+            device_name: 'Assigned Android Device',
+            model: 'Android Phone',
+            manufacturer: 'Generic',
+            android_version: '14',
+            sdk_version: 34,
+            screen_width: 720,
+            screen_height: 1600,
+            screen_density: 300,
+            connection_type: 'usb',
+            status: 'offline',
+            last_seen: assignment.updated_at || assignment.created_at,
+            created_at: assignment.created_at,
+            updated_at: assignment.updated_at,
+            permissions: {
+              can_view: assignment.can_view ?? true,
+              can_control: assignment.can_control ?? false,
+              can_share: assignment.can_share ?? false,
+            }
+          });
+        }
+      }
+    }
 
     if (user.system_role === 'customer') {
       // Return devices belonging to this customer's organization + any devices assigned to them

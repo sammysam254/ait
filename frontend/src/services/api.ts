@@ -65,7 +65,10 @@ export class ApiService {
 
     if (supaData?.session) {
       const userMeta = supaData.session.user.user_metadata || {};
-      const userObj = {
+      const token = supaData.session.access_token;
+      localStorage.setItem('vtx_token', token);
+
+      let userObj = {
         id: supaData.session.user.id,
         email: cleanEmail,
         fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (userMeta.full_name || cleanEmail.split('@')[0]),
@@ -75,7 +78,13 @@ export class ApiService {
         plan: isSuperAdmin ? 'enterprise' : 'starter',
       };
 
-      const token = supaData.session.access_token;
+      try {
+        const meRes = await this.request<{ user: any }>('/auth/me');
+        if (meRes?.user) {
+          userObj = { ...userObj, ...meRes.user };
+        }
+      } catch (e) {}
+
       localStorage.setItem('vtx_user', JSON.stringify(userObj));
       return { token, user: userObj };
     }
@@ -173,7 +182,7 @@ export class ApiService {
 
       // If auto-logged in with session
       if (supaData.session) {
-        const userObj = {
+        let userObj = {
           id: supaData.session.user.id,
           email: cleanEmail,
           fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
@@ -184,6 +193,14 @@ export class ApiService {
         };
         const token = supaData.session.access_token;
         localStorage.setItem('vtx_token', token);
+
+        try {
+          const meRes = await this.request<{ user: any }>('/auth/me');
+          if (meRes?.user) {
+            userObj = { ...userObj, ...meRes.user };
+          }
+        } catch (e) {}
+
         localStorage.setItem('vtx_user', JSON.stringify(userObj));
         return { token, user: userObj };
       }
@@ -192,7 +209,7 @@ export class ApiService {
       try {
         const loginAttempt = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
         if (loginAttempt.data?.session) {
-          const userObj = {
+          let userObj = {
             id: loginAttempt.data.session.user.id,
             email: cleanEmail,
             fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (fullName || cleanEmail.split('@')[0]),
@@ -203,6 +220,14 @@ export class ApiService {
           };
           const token = loginAttempt.data.session.access_token;
           localStorage.setItem('vtx_token', token);
+
+          try {
+            const meRes = await this.request<{ user: any }>('/auth/me');
+            if (meRes?.user) {
+              userObj = { ...userObj, ...meRes.user };
+            }
+          } catch (e) {}
+
           localStorage.setItem('vtx_user', JSON.stringify(userObj));
           return { token, user: userObj };
         }
@@ -221,7 +246,7 @@ export class ApiService {
       const cleanEmail = data.session.user.email?.toLowerCase().trim() || '';
       const isSuperAdmin = cleanEmail === 'sammyseth260@gmail.com';
       const userMeta = data.session.user.user_metadata || {};
-      const userObj = {
+      let userObj = {
         id: data.session.user.id,
         email: cleanEmail,
         fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (userMeta.full_name || cleanEmail.split('@')[0]),
@@ -230,6 +255,14 @@ export class ApiService {
         organizationName: isSuperAdmin ? 'Vertex Global Device Farm' : `${cleanEmail.split('@')[0]}'s Cloud Devices`,
         plan: isSuperAdmin ? 'enterprise' : 'starter',
       };
+
+      try {
+        const meRes = await this.request<{ user: any }>('/auth/me');
+        if (meRes?.user) {
+          userObj = { ...userObj, ...meRes.user };
+        }
+      } catch (e) {}
+
       localStorage.setItem('vtx_user', JSON.stringify(userObj));
       return { user: userObj };
     }
