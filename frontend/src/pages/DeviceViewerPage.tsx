@@ -411,7 +411,12 @@ export const DeviceViewerPage: React.FC = () => {
           }
         } catch (e) {}
       } else if (event.data instanceof ArrayBuffer) {
-        const bytes = new Uint8Array(event.data);
+        let bytes = new Uint8Array(event.data);
+
+        // Strip 36-byte UUID prefix if forwarded with routing envelope
+        if (bytes.length > 36 && bytes[8] === 0x2d && bytes[13] === 0x2d && bytes[18] === 0x2d && bytes[23] === 0x2d) {
+          bytes = bytes.subarray(36);
+        }
 
         // Auto-detect live audio packet prefixed with 'AUD:' (0x41 0x55 0x44 0x3a)
         if (bytes.length > 4 && bytes[0] === 0x41 && bytes[1] === 0x55 && bytes[2] === 0x44 && bytes[3] === 0x3a) {
@@ -470,22 +475,22 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Real-time sub-50ms live-edge lock
+            // Smooth low-latency sync: uses playbackRate to catch up without continuous decoder seek freezes
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
 
-              if (!initialLiveJumpRef.current && liveEdge > 0.05) {
-                // Instant initial lock to live edge on first frame
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
+              if (!initialLiveJumpRef.current && liveEdge > 0.25) {
+                // Seek ONCE at the very beginning to jump straight to live edge
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.08);
                 initialLiveJumpRef.current = true;
-              } else if (drift > 0.15 && !videoRef.current.seeking) {
-                // Immediate snap to live edge if buffer accumulates >150ms
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
-              } else if (drift > 0.06) {
-                // Gentle acceleration for micro-drifts
-                videoRef.current.playbackRate = 1.25;
-              } else {
+              } else if (drift > 1.0 && !videoRef.current.seeking) {
+                // Only seek if severely behind (>1.0s, e.g. tab was hidden)
+                videoRef.current.currentTime = Math.max(0, liveEdge - 0.08);
+              } else if (drift > 0.15) {
+                // Smooth acceleration: catches up in a fraction of a second with ZERO black screens
+                videoRef.current.playbackRate = 1.15;
+              } else if (drift < 0.05) {
                 videoRef.current.playbackRate = 1.0;
               }
             }
