@@ -742,6 +742,24 @@ export const DeviceViewerPage: React.FC = () => {
     cachedRectRef.current = null;
   };
 
+  // Global release handler: ensures touch_up is NEVER dropped even if dragged off-screen on mobile or desktop
+  useEffect(() => {
+    const onGlobalPointerUp = () => {
+      if (pointerDownPosRef.current && canControl) {
+        sendInput('touch_up', { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y });
+        pointerDownPosRef.current = null;
+        isPointerDraggingRef.current = false;
+        cachedRectRef.current = null;
+      }
+    };
+    window.addEventListener('pointerup', onGlobalPointerUp);
+    window.addEventListener('pointercancel', onGlobalPointerUp);
+    return () => {
+      window.removeEventListener('pointerup', onGlobalPointerUp);
+      window.removeEventListener('pointercancel', onGlobalPointerUp);
+    };
+  }, [canControl]);
+
   // Physical keyboard typing listener when the screen viewer overlay is focused
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (!canControl) return;

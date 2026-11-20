@@ -215,10 +215,10 @@ export class SignalingServer {
             }
             for (const viewer of targetRoom.viewers) {
               if (viewer.ws.readyState === WebSocket.OPEN) {
-                // Generous 2MB headroom for video; drop audio first if congested
+                // Strict 128KB buffer ceiling: guarantees viewer never accumulates more than ~100ms latency
                 const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
-                if (isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
-                if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 2 * 1024 * 1024) continue;
+                if (isAudio && viewer.ws.bufferedAmount > 64 * 1024) continue;
+                if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
                 viewer.ws.send(videoPayload);
                 forwarded++;
               }
@@ -240,8 +240,8 @@ export class SignalingServer {
                 for (const viewer of r.viewers) {
                   if (viewer.ws.readyState === WebSocket.OPEN) {
                     const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
-                    if (isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
-                    if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 2 * 1024 * 1024) continue;
+                    if (isAudio && viewer.ws.bufferedAmount > 64 * 1024) continue;
+                    if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
                     viewer.ws.send(videoPayload);
                     forwarded++;
                   }

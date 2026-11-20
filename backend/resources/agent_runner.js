@@ -311,6 +311,22 @@ async function wakePhone(serial) {
   } catch (e) {}
 }
 
+const lastTouchState = new Map(); // serial -> { isDown, x, y, width, height, time }
+
+// Watchdog: auto-release stuck touch pointers if mobile connection drops mid-gesture
+setInterval(() => {
+  const now = Date.now();
+  for (const [serial, state] of lastTouchState.entries()) {
+    if (state.isDown && now - state.time > 4000) {
+      const sock = controlSockets.get(serial);
+      if (sock && !sock.destroyed) {
+        sendScrcpyTouch(sock, 1, state.x, state.y, state.width, state.height);
+      }
+      state.isDown = false;
+    }
+  }
+}, 1000);
+
 async function injectInput(serial, action, data) {
   try {
     if (!data) data = {};
@@ -329,15 +345,25 @@ async function injectInput(serial, action, data) {
 
     if (sock && !sock.destroyed) {
       switch (action) {
-        case 'touch_down':
+        case 'touch_down': {
+          const prev = lastTouchState.get(serial);
+          if (prev && prev.isDown) {
+            sendScrcpyTouch(sock, 1, prev.x, prev.y, prev.width, prev.height);
+          }
+          lastTouchState.set(serial, { isDown: true, x, y, width: targetW, height: targetH, time: Date.now() });
           sendScrcpyTouch(sock, 0, x, y, targetW, targetH);
           return true;
-        case 'touch_move':
+        }
+        case 'touch_move': {
+          lastTouchState.set(serial, { isDown: true, x, y, width: targetW, height: targetH, time: Date.now() });
           sendScrcpyTouch(sock, 2, x, y, targetW, targetH);
           return true;
-        case 'touch_up':
+        }
+        case 'touch_up': {
+          lastTouchState.set(serial, { isDown: false, x, y, width: targetW, height: targetH, time: Date.now() });
           sendScrcpyTouch(sock, 1, x, y, targetW, targetH);
           return true;
+        }
         case 'scroll':
           sendScrcpyScroll(sock, x, y, targetW, targetH, data.hScroll || 0, data.vScroll || 0);
           return true;
