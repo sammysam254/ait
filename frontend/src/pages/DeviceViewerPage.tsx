@@ -532,12 +532,14 @@ export const DeviceViewerPage: React.FC = () => {
     };
   };
 
+  const cachedRectRef = useRef<DOMRect | null>(null);
+
   // Dynamic screen dimensions decided directly by active scrcpy stream
   const getDeviceCoords = (clientX: number, clientY: number) => {
     const el = overlayRef.current;
     if (!el) return null;
 
-    const rect = el.getBoundingClientRect();
+    const rect = cachedRectRef.current || el.getBoundingClientRect();
     const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
     const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
 
@@ -665,81 +667,16 @@ export const DeviceViewerPage: React.FC = () => {
     };
   }, [canControl, device, streamDimensions]);
 
-  // High-performance native touch listener: zero-latency 120Hz gesture tracking on mobile
-  useEffect(() => {
-    const el = overlayRef.current;
-    if (!el) return;
-
-    let touchActive = false;
-    let lastMoveTime = 0;
-
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.cancelable) e.preventDefault();
-      startAudio();
-      if (!canControl || e.touches.length === 0) return;
-      touchActive = true;
-
-      const t = e.touches[0];
-      const coords = getDeviceCoords(t.clientX, t.clientY);
-      if (!coords) return;
-
-      sendInput('touch_down', { x: coords.x, y: coords.y });
-      lastMoveTime = performance.now();
-    };
-
-    const onTouchMove = (e: TouchEvent) => {
-      if (!touchActive || !canControl || e.touches.length === 0) return;
-      if (e.cancelable) e.preventDefault();
-
-      const now = performance.now();
-      // Fast ~100Hz (10ms) sampling: eliminates network buffer bloat while maintaining 100% fluid real-time tracking
-      if (now - lastMoveTime < 10) return;
-      lastMoveTime = now;
-
-      const t = e.touches[0];
-      const coords = getDeviceCoords(t.clientX, t.clientY);
-      if (!coords) return;
-
-      sendInput('touch_move', { x: coords.x, y: coords.y });
-    };
-
-    const onTouchEnd = (e: TouchEvent) => {
-      if (!touchActive || !canControl) return;
-      if (e.cancelable) e.preventDefault();
-      touchActive = false;
-
-      if (e.changedTouches.length > 0) {
-        const t = e.changedTouches[0];
-        const coords = getDeviceCoords(t.clientX, t.clientY);
-        if (coords) {
-          sendInput('touch_up', { x: coords.x, y: coords.y });
-          return;
-        }
-      }
-      sendInput('touch_up', {});
-    };
-
-    el.addEventListener('touchstart', onTouchStart, { passive: false });
-    el.addEventListener('touchmove', onTouchMove, { passive: false });
-    el.addEventListener('touchend', onTouchEnd, { passive: false });
-    el.addEventListener('touchcancel', onTouchEnd, { passive: false });
-
-    return () => {
-      el.removeEventListener('touchstart', onTouchStart);
-      el.removeEventListener('touchmove', onTouchMove);
-      el.removeEventListener('touchend', onTouchEnd);
-      el.removeEventListener('touchcancel', onTouchEnd);
-    };
-  }, [canControl, device, streamDimensions]);
-
-  // High-performance Pointer Events for desktop mouse clicks
+  // High-performance unified Pointer Events for mouse, mobile touch, and stylus with 0ms delay
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'touch') return; // Handled directly by native touch listener for 0ms delay
     if (e.cancelable) e.preventDefault();
     startAudio();
     if (!canControl) return;
 
-    if (overlayRef.current) overlayRef.current.focus();
+    if (overlayRef.current) {
+      cachedRectRef.current = overlayRef.current.getBoundingClientRect();
+      overlayRef.current.focus();
+    }
 
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
@@ -756,15 +693,20 @@ export const DeviceViewerPage: React.FC = () => {
       time: performance.now(),
     };
     isPointerDraggingRef.current = false;
-
-    sendInput('touch_down', { x: coords.x, y: coords.y });
     lastMoveSentRef.current = 0;
+
+    // Send touch_down IMMEDIATELY with 0ms delay!
+    sendInput('touch_down', { x: coords.x, y: coords.y });
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'touch') return;
     if (!pointerDownPosRef.current || !canControl) return;
     if (e.cancelable) e.preventDefault();
+
+    const now = performance.now();
+    // 75Hz (13ms) throttle: keeps movement 100% fluid and 1:1 while completely eliminating WebSocket network queue lag!
+    if (now - lastMoveSentRef.current < 13) return;
+    lastMoveSentRef.current = now;
 
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
@@ -773,7 +715,6 @@ export const DeviceViewerPage: React.FC = () => {
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'touch') return;
     if (!pointerDownPosRef.current || !canControl) return;
     if (e.cancelable) e.preventDefault();
 
@@ -787,10 +728,10 @@ export const DeviceViewerPage: React.FC = () => {
     sendInput('touch_up', { x: currentPos.x, y: currentPos.y });
     pointerDownPosRef.current = null;
     isPointerDraggingRef.current = false;
+    cachedRectRef.current = null;
   };
 
   const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'touch') return;
     if (pointerDownPosRef.current && canControl) {
       const coords = getDeviceCoords(e.clientX, e.clientY);
       const currentPos = coords || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
@@ -798,6 +739,7 @@ export const DeviceViewerPage: React.FC = () => {
     }
     pointerDownPosRef.current = null;
     isPointerDraggingRef.current = false;
+    cachedRectRef.current = null;
   };
 
   // Physical keyboard typing listener when the screen viewer overlay is focused

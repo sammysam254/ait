@@ -243,8 +243,8 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     msg.writeUInt16BE(width, 18);
     msg.writeUInt16BE(height, 20);
     msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
-    msg.writeUInt32BE(0, 24); // action_button = 0 (pure native touch, zero mouse button delay)
-    msg.writeUInt32BE(0, 28); // buttons = 0 (pure native capacitive touch)
+    msg.writeUInt32BE(action === 0 ? 1 : 0, 24); // action_button: AMOTION_EVENT_BUTTON_PRIMARY on down
+    msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons: AMOTION_EVENT_BUTTON_PRIMARY active while touching
     sock.write(msg);
     return true;
   } catch (e) {
