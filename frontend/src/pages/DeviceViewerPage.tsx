@@ -203,12 +203,9 @@ export const DeviceViewerPage: React.FC = () => {
     try {
       if (isMuted) return;
 
-      if (!audioCtxRef.current) {
-        startAudio();
+      // Only process audio if AudioContext has been activated by user gesture
+      if (!audioCtxRef.current || audioCtxRef.current.state !== 'running') {
         return;
-      }
-      if (audioCtxRef.current.state === 'suspended') {
-        audioCtxRef.current.resume().catch(() => {});
       }
 
       // Strip WAV header if present (RIFF)
@@ -484,22 +481,16 @@ export const DeviceViewerPage: React.FC = () => {
               videoRef.current.play().catch(() => {});
             }
 
-            // Aggressive zero-latency live sync: never lets video fall behind physical device!
+            // Smooth zero-seeking live edge sync: accelerates playback to stay real-time without black screen decoder stalls
             if (videoRef.current && videoRef.current.buffered.length > 0) {
               const liveEdge = videoRef.current.buffered.end(videoRef.current.buffered.length - 1);
               const drift = liveEdge - videoRef.current.currentTime;
 
-              if (!initialLiveJumpRef.current && liveEdge > 0.05) {
-                // Seek ONCE at the very beginning to jump straight to live edge
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
-                initialLiveJumpRef.current = true;
-              } else if (drift > 0.35 && !videoRef.current.seeking) {
-                // If behind by >350ms, hard-snap straight to live edge
-                videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
-              } else if (drift > 0.04) {
-                // Dynamic speedup (up to 2.5x) to eliminate any 40ms-300ms drift in milliseconds
-                videoRef.current.playbackRate = 1.0 + Math.min(1.5, drift * 3.5);
-              } else {
+              if (drift > 0.25) {
+                videoRef.current.playbackRate = 1.35;
+              } else if (drift > 0.08) {
+                videoRef.current.playbackRate = 1.15;
+              } else if (drift < 0.03) {
                 videoRef.current.playbackRate = 1.0;
               }
             }
