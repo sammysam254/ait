@@ -27,7 +27,8 @@ export const DashboardLayout: React.FC = () => {
   const navigate = useNavigate();
 
   const isCustomer = user?.role === 'customer';
-  const isAdmin = user?.role === 'admin';
+  const isSuperAdminEmail = user?.email?.toLowerCase().trim() === 'sammyseth260@gmail.com';
+  const isAdmin = isSuperAdminEmail && user?.role === 'admin';
   const isAssignedUser = user?.role === 'assigned_user';
 
   const navItems = [

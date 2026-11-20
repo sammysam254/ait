@@ -46,6 +46,7 @@ router.post('/login', (req: Request, res: Response) => {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
+    inMemoryDb.save();
   }
 
   if (!profile) {
@@ -301,6 +302,8 @@ router.post('/register', (req: Request, res: Response) => {
       }
     }
 
+    inMemoryDb.save();
+
     const org = inMemoryDb.organizations.get(orgId);
     const token = jwt.sign(
       {
@@ -365,6 +368,7 @@ router.post('/register', (req: Request, res: Response) => {
 
   inMemoryDb.profiles.set(userId, profile);
   inMemoryDb.organizations.set(orgId, organization);
+  inMemoryDb.save();
 
   const token = jwt.sign(
     {

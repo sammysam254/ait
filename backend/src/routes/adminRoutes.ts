@@ -4,8 +4,14 @@ import { inMemoryDb } from '../database/supabaseClient';
 
 const router = Router();
 
-// Protect all admin routes with requireRole(['admin'])
-router.use(authenticate, requireRole(['admin']));
+// Protect all admin routes with strict Super Admin email and role verification
+router.use(authenticate, (req: Request, res: Response, next) => {
+  const user = req.user;
+  if (!user || user.email.toLowerCase().trim() !== 'sammyseth260@gmail.com' || user.system_role !== 'admin') {
+    return res.status(403).json({ error: 'Access denied: Platform Super Admin clearance required.' });
+  }
+  next();
+});
 
 // GET /api/admin/overview - Platform dashboard stats
 router.get('/overview', (req: Request, res: Response) => {

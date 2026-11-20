@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: vertex-saas-backend
+    user: "0:0"
     restart: unless-stopped
     ports:
       - "80:5000"

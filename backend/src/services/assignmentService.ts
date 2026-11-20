@@ -156,6 +156,8 @@ export class AssignmentService {
       created_at: new Date().toISOString(),
     });
 
+    inMemoryDb.save();
+
     return {
       success: true,
       user: assignedUser,

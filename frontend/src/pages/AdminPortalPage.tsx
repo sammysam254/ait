@@ -11,15 +11,33 @@ import {
   Building,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 
 export const AdminPortalPage: React.FC = () => {
+  const { user } = useAuth();
   const [overview, setOverview] = useState<any>(null);
   const [customers, setCustomers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const isSuperAdmin = user?.email?.toLowerCase().trim() === 'sammyseth260@gmail.com';
+
   useEffect(() => {
-    loadAdminData();
-  }, []);
+    if (isSuperAdmin) {
+      loadAdminData();
+    }
+  }, [user]);
+
+  if (!isSuperAdmin) {
+    return (
+      <div className="min-h-[50vh] flex flex-col items-center justify-center text-center p-8 space-y-4">
+        <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-400">
+          <ShieldCheck className="h-8 w-8 mx-auto mb-2" />
+          <h2 className="text-base font-bold text-white">Access Denied</h2>
+          <p className="text-xs text-gray-400 mt-1">Platform Super Admin clearance is required to view this portal.</p>
+        </div>
+      </div>
+    );
+  }
 
   const loadAdminData = async () => {
     setLoading(true);

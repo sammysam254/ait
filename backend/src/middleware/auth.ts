@@ -54,12 +54,18 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
         id: userId,
         email: userEmail,
         full_name: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (decoded.user_metadata?.full_name || userEmail.split('@')[0]),
-        system_role: isSuperAdmin ? 'admin' : (assignedUser ? 'assigned_user' : (decoded.user_metadata?.system_role || 'customer')),
+        system_role: isSuperAdmin ? 'admin' : (assignedUser ? 'assigned_user' : 'customer'),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
       inMemoryDb.profiles.set(userId, profile);
       inMemoryDb.save();
+    } else {
+      // SECURITY ENFORCEMENT: Never allow non-superadmin to have admin privileges under any circumstances
+      if (!isSuperAdmin && profile.system_role === 'admin') {
+        profile.system_role = assignedUser ? 'assigned_user' : 'customer';
+        inMemoryDb.save();
+      }
     }
 
     if (assignedUser && !isSuperAdmin) {
@@ -121,7 +127,7 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
     req.user = {
       id: profile.id,
       email: profile.email,
-      system_role: isSuperAdmin ? 'admin' : profile.system_role,
+      system_role: isSuperAdmin ? 'admin' : (assignedUser ? 'assigned_user' : 'customer'),
       organizationId: organizationId,
     };
 

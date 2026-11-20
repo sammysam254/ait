@@ -239,8 +239,9 @@ class InMemoryDatabase {
         auditLogs: this.auditLogs.slice(0, 500),
       };
       fs.writeFileSync(this.dbFilePath, JSON.stringify(data, null, 2), 'utf8');
+      console.log(`[Database] Persistent state saved to ${this.dbFilePath} (${this.assignedUsers.size} workers, ${this.deviceAssignments.size} assignments, ${this.devices.size} devices)`);
     } catch (err: any) {
-      console.warn('[Database] State file save error:', err.message);
+      console.error('[Database] CRITICAL: State file save error:', err.message);
     }
   }
 

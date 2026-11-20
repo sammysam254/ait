@@ -98,7 +98,7 @@ export class SignalingServer {
               id: userId,
               email: userEmail,
               full_name: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (decoded.user_metadata?.full_name || userEmail.split('@')[0]),
-              system_role: isSuperAdmin ? 'admin' : (decoded.user_metadata?.system_role || 'customer'),
+              system_role: isSuperAdmin ? 'admin' : 'customer',
               created_at: new Date().toISOString(),
               updated_at: new Date().toISOString(),
             };
