@@ -402,8 +402,6 @@ async function injectInput(serial, action, data) {
           return true;
       }
     }
-      }
-    }
 
     // Fallback via high-speed interactive shell
     switch (action) {
