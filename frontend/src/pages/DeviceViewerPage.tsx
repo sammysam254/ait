@@ -920,7 +920,6 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
   const lastMoveSentRef = useRef(0);
   const pointerDownPosRef = useRef<{ x: number; y: number; clientX: number; clientY: number; time: number } | null>(null);
   const isPointerDraggingRef = useRef(false);
-  const moveHistoryRef = useRef<Array<{ x: number; y: number; time: number }>>([]);
 
   // Active (non-passive) wheel listener: proportional native scrolling without massive full-screen flings
   useEffect(() => {
@@ -981,6 +980,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
 
   // High-performance unified Pointer Events for mouse, mobile touch, and stylus with 0ms delay
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== undefined && e.button !== 0) return; // Only main button
     if (e.cancelable) e.preventDefault();
     startAudio();
     if (!canControl) return;
@@ -1006,7 +1006,6 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
       time: now,
     };
     isPointerDraggingRef.current = false;
-    moveHistoryRef.current = [{ x: coords.x, y: coords.y, time: now }];
     pendingMoveRef.current = null;
     if (rafIdRef.current !== null) {
       cancelAnimationFrame(rafIdRef.current);
@@ -1024,21 +1023,14 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
     const coords = getDeviceCoords(e.clientX, e.clientY);
     if (!coords) return;
 
-    const now = performance.now();
     const dx = coords.x - pointerDownPosRef.current.x;
     const dy = coords.y - pointerDownPosRef.current.y;
     const dist = Math.hypot(dx, dy);
 
-    // Suppress micro finger jitter (< 4px) so taps remain pure 0ms taps
+    // Suppress micro finger jitter (< 3px) so taps remain pure 0ms taps
     if (!isPointerDraggingRef.current) {
-      if (dist < 4) return;
+      if (dist < 3) return;
       isPointerDraggingRef.current = true;
-    }
-
-    // Record movement history (keep last 100ms for exit velocity calculation)
-    moveHistoryRef.current.push({ x: coords.x, y: coords.y, time: now });
-    if (moveHistoryRef.current.length > 10) {
-      moveHistoryRef.current = moveHistoryRef.current.filter((p) => now - p.time <= 100);
     }
 
     pendingMoveRef.current = coords;
@@ -1070,54 +1062,19 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
     } catch (err) {}
 
     const coords = getDeviceCoords(e.clientX, e.clientY);
-    const currentPos = coords || pendingMoveRef.current || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
+    const endPos = coords || pendingMoveRef.current || { x: pointerDownPosRef.current.x, y: pointerDownPosRef.current.y };
 
     if (pendingMoveRef.current) {
       sendInput('touch_move', pendingMoveRef.current);
       pendingMoveRef.current = null;
     }
 
-    const startX = pointerDownPosRef.current.x;
-    const startY = pointerDownPosRef.current.y;
-    const endX = currentPos.x;
-    const endY = currentPos.y;
-    const dx = endX - startX;
-    const dy = endY - startY;
-    const dist = Math.hypot(dx, dy);
-    const dt = Math.max(1, performance.now() - pointerDownPosRef.current.time);
-    const speed = dist / dt; // pixels per ms
-
-    // Gesture detection:
-    // Tap: minimal movement (< 10px) and quick duration (< 350ms)
-    const isTap = dist < 10 && dt < 350;
-
-    if (isTap) {
-      // Pure instant tap dispatched at exact down coordinates
-      sendInput('touch_up', { x: startX, y: startY, isTap: true });
-    } else {
-      // Calculate real exit velocity over the last 60-80ms before release
-      const history = moveHistoryRef.current;
-      const now = performance.now();
-      const recentPoints = history.filter((p) => now - p.time <= 80);
-
-      let vx = 0;
-      let vy = 0;
-      if (recentPoints.length >= 2) {
-        const oldest = recentPoints[0];
-        const timeDiff = now - oldest.time;
-        if (timeDiff > 15) {
-          vx = (endX - oldest.x) / timeDiff; // px / ms
-          vy = (endY - oldest.y) / timeDiff;
-        }
-      }
-
-      sendInput('touch_up', { x: endX, y: endY, vx, vy });
-    }
+    // Instant pure physical release at exact coordinates
+    sendInput('touch_up', { x: endPos.x, y: endPos.y });
 
     pointerDownPosRef.current = null;
     isPointerDraggingRef.current = false;
     cachedRectRef.current = null;
-    moveHistoryRef.current = [];
   };
 
   const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
