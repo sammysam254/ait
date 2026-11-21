@@ -512,12 +512,15 @@ export class ApiService {
 
   static async adminSetSubscription(data: {
     organizationId: string;
-    plan: 'starter' | 'enterprise' | 'custom';
-    subscriptionStatus: 'active' | 'trial_active' | 'expired';
+    plan?: 'starter' | 'enterprise' | 'custom';
+    subscriptionStatus?: 'active' | 'trial_active' | 'expired';
     maxDevices?: number;
     maxAgents?: number;
     priceUsd?: number;
     durationDays?: number;
+    customPricing?: { starter?: number; enterprise?: number; custom?: number };
+    priceAdjustmentUsd?: number;
+    pricingNote?: string;
   }) {
     return this.request<{ success: boolean; organization: any; message: string }>('/admin/set-subscription', {
       method: 'POST',

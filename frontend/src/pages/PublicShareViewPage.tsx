@@ -121,9 +121,17 @@ export const PublicShareViewPage: React.FC = () => {
               <Lock className="h-6 w-6" />
             </div>
             <h2 className="text-xl font-bold text-white tracking-tight">Protected Device Access</h2>
-            <p className="text-xs text-gray-400">
-              Enter the security PIN provided by the device owner to open the remote Android stream.
-            </p>
+            <div className="text-xs text-gray-400 space-y-1">
+              <div>{shareInfo?.deviceName || 'Remote Android Device'}</div>
+              {shareInfo?.adbSerial && (
+                <div className="font-mono text-emerald-400 font-bold text-[11px] select-all bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30 inline-block">
+                  SN: {shareInfo.adbSerial}
+                </div>
+              )}
+              <div className="text-[11px] text-gray-500 pt-1">
+                Enter the security PIN provided by the device owner to open the remote Android stream.
+              </div>
+            </div>
           </div>
 
           <form onSubmit={handleVerifyPin} className="space-y-4">

@@ -214,6 +214,12 @@ export const DevicesPage: React.FC = () => {
 
                   {/* Device Specs Table */}
                   <div className="grid grid-cols-2 gap-2 text-xs bg-gray-950/60 p-3 rounded-xl border border-gray-800/60">
+                    <div className="col-span-2 flex items-center justify-between bg-gray-900/60 px-2 py-1.5 rounded-lg border border-gray-800/80">
+                      <span className="text-gray-400 font-semibold text-[10px] uppercase">Device Serial</span>
+                      <span className="font-mono text-emerald-400 font-bold select-all text-xs bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                        {device.adb_serial}
+                      </span>
+                    </div>
                     <div>
                       <span className="text-gray-500 block text-[10px] uppercase">Android OS</span>
                       <span className="font-semibold text-gray-300">Android {device.android_version}</span>

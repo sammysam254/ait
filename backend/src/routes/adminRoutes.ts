@@ -54,6 +54,7 @@ router.get('/overview', (req: Request, res: Response) => {
 
 // GET /api/admin/customers - List all customers and their device counts
 router.get('/customers', (req: Request, res: Response) => {
+  const { SubscriptionService } = require('../services/subscriptionService');
   const customers = Array.from(inMemoryDb.organizations.values()).map(org => {
     const owner = inMemoryDb.profiles.get(org.owner_id);
     const orgAgents = Array.from(inMemoryDb.agents.values()).filter(a => a.organization_id === org.id);
@@ -70,6 +71,13 @@ router.get('/customers', (req: Request, res: Response) => {
       plan: org.plan,
       maxDevices: org.max_devices,
       maxAgents: org.max_agents,
+      subscriptionStatus: org.subscription_status || 'expired',
+      currentPeriodEnd: org.current_period_end || null,
+      customPricing: org.custom_pricing || null,
+      priceAdjustmentUsd: org.price_adjustment_usd || 0,
+      pricingNote: org.pricing_note || null,
+      starterPrice: SubscriptionService.getPlanPriceForOrg(org, 'starter'),
+      enterprisePrice: SubscriptionService.getPlanPriceForOrg(org, 'enterprise'),
       deviceCount: orgDevices.length,
       agentCount: orgAgents.length,
       activeSharesCount: orgShares.filter(s => !s.is_revoked).length,
@@ -81,10 +89,21 @@ router.get('/customers', (req: Request, res: Response) => {
   return res.json({ customers });
 });
 
-// POST /api/admin/set-subscription - Super Admin manually activates, upgrades, or sets Custom Plan
+// POST /api/admin/set-subscription - Super Admin manually activates, upgrades, or sets Custom Plan & Pricing
 router.post('/set-subscription', (req: Request, res: Response) => {
   const adminUser = req.user!;
-  const { organizationId, plan, subscriptionStatus, maxDevices, maxAgents, priceUsd, durationDays } = req.body;
+  const {
+    organizationId,
+    plan,
+    subscriptionStatus,
+    maxDevices,
+    maxAgents,
+    priceUsd,
+    durationDays,
+    customPricing,
+    priceAdjustmentUsd,
+    pricingNote,
+  } = req.body;
 
   if (!organizationId) {
     return res.status(400).json({ error: 'organizationId is required.' });
@@ -92,12 +111,15 @@ router.post('/set-subscription', (req: Request, res: Response) => {
 
   const { SubscriptionService } = require('../services/subscriptionService');
   const result = SubscriptionService.adminSetSubscription(adminUser.id, organizationId, {
-    plan: plan || 'custom',
-    subscriptionStatus: subscriptionStatus || 'active',
-    maxDevices: maxDevices ? parseInt(maxDevices, 10) : undefined,
-    maxAgents: maxAgents ? parseInt(maxAgents, 10) : undefined,
-    priceUsd: priceUsd ? parseFloat(priceUsd) : undefined,
-    durationDays: durationDays ? parseInt(durationDays, 10) : 30,
+    plan: plan || undefined,
+    subscriptionStatus: subscriptionStatus || undefined,
+    maxDevices: maxDevices !== undefined ? parseInt(maxDevices, 10) : undefined,
+    maxAgents: maxAgents !== undefined ? parseInt(maxAgents, 10) : undefined,
+    priceUsd: priceUsd !== undefined ? parseFloat(priceUsd) : undefined,
+    durationDays: durationDays !== undefined ? parseInt(durationDays, 10) : 30,
+    customPricing: customPricing || undefined,
+    priceAdjustmentUsd: priceAdjustmentUsd !== undefined ? parseFloat(priceAdjustmentUsd) : undefined,
+    pricingNote: pricingNote !== undefined ? pricingNote : undefined,
   });
 
   if (!result.success) {
@@ -107,7 +129,7 @@ router.post('/set-subscription', (req: Request, res: Response) => {
   return res.json({
     success: true,
     organization: result.organization,
-    message: `Subscription successfully updated for organization.`,
+    message: `Subscription and pricing override successfully saved for organization.`,
   });
 });
 

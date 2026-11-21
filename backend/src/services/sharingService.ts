@@ -181,7 +181,7 @@ export class SharingService {
   /**
    * Inspect Share by public token (without verifying PIN yet)
    */
-  static inspectShareToken(token: string): { valid: boolean; deviceName?: string; expiresAt?: string; allowControl?: boolean; error?: string } {
+  static inspectShareToken(token: string): { valid: boolean; deviceName?: string; adbSerial?: string; expiresAt?: string; allowControl?: boolean; error?: string } {
     const share = Array.from(inMemoryDb.deviceShares.values()).find(s => s.share_token === token);
 
     if (!share || share.is_revoked) {
@@ -215,11 +215,12 @@ export class SharingService {
       };
     }
 
-    const device = inMemoryDb.devices.get(share.device_id);
+    const device = inMemoryDb.devices.get(share.device_id) || Array.from(inMemoryDb.devices.values()).find(d => d.adb_serial === share.device_id);
 
     return {
       valid: true,
       deviceName: device ? device.device_name : 'Android Device',
+      adbSerial: device ? device.adb_serial : share.device_id,
       expiresAt: share.expires_at,
       allowControl: share.allow_control,
     };

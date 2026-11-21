@@ -110,6 +110,31 @@ export const SUBSCRIPTION_TERMS = [
 
 export class SubscriptionService {
   /**
+   * Calculate effective plan price for an organization (with custom overrides or +/- adjustments)
+   */
+  static getPlanPriceForOrg(org: Organization | undefined, plan: 'starter' | 'enterprise' | 'custom'): number {
+    const defaultPrice = SUBSCRIPTION_PLANS[plan]?.priceUsd ?? (plan === 'starter' ? 80 : 100);
+    if (!org) return defaultPrice;
+
+    // Direct plan override if set
+    if (org.custom_pricing && typeof org.custom_pricing[plan] === 'number') {
+      return Math.max(0, org.custom_pricing[plan]!);
+    }
+
+    // General +/- adjustment in USD (e.g. -20 for discount or +10 for markup)
+    if (typeof org.price_adjustment_usd === 'number' && org.price_adjustment_usd !== 0) {
+      return Math.max(0, defaultPrice + org.price_adjustment_usd);
+    }
+
+    // Custom plan quote override
+    if (plan === 'custom' && typeof org.custom_price_usd === 'number') {
+      return org.custom_price_usd;
+    }
+
+    return defaultPrice;
+  }
+
+  /**
    * Helper to verify if an organization's subscription is currently active.
    * Auto-marks expired subscriptions in memory & saves.
    */
@@ -224,6 +249,9 @@ export class SubscriptionService {
       daysRemaining = Math.max(0, Math.ceil((due - now) / (1000 * 3600 * 24)));
     }
 
+    const starterPriceUsd = this.getPlanPriceForOrg(org, 'starter');
+    const enterprisePriceUsd = this.getPlanPriceForOrg(org, 'enterprise');
+
     return {
       organizationId,
       organizationName: org?.name || 'My Organization',
@@ -241,6 +269,11 @@ export class SubscriptionService {
       lastPaymentReference: org?.last_payment_reference || null,
       lastPaymentAmount: org?.last_payment_amount || null,
       customPriceUsd: org?.custom_price_usd || null,
+      customPricing: org?.custom_pricing || null,
+      priceAdjustmentUsd: org?.price_adjustment_usd || 0,
+      pricingNote: org?.pricing_note || null,
+      starterPriceUsd,
+      enterprisePriceUsd,
       contactPhone: '+254706499848',
       terms: SUBSCRIPTION_TERMS,
       plans: SUBSCRIPTION_PLANS,
@@ -330,9 +363,9 @@ export class SubscriptionService {
     userEmail: string,
     plan: 'starter' | 'enterprise'
   ): { reference: string; amountCents: number; amountUsd: number; publicKey: string; email: string; plan: string } {
-    const planDef = SUBSCRIPTION_PLANS[plan];
-    const amountUsd = planDef.priceUsd;
-    const amountCents = amountUsd * 100; // Paystack takes currency sub-units (e.g. 8000 for $80 USD)
+    const org = inMemoryDb.organizations.get(organizationId);
+    const amountUsd = this.getPlanPriceForOrg(org, plan);
+    const amountCents = Math.round(amountUsd * 100); // Paystack takes currency sub-units (e.g. 8000 for $80 USD)
     const reference = `VTX_${plan.toUpperCase()}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     return {
@@ -388,9 +421,9 @@ export class SubscriptionService {
         };
       }
 
-      // Check paid amount
-      const planDef = SUBSCRIPTION_PLANS[expectedPlan];
-      const expectedCents = planDef.priceUsd * 100;
+      // Check paid amount against effective organization plan price
+      const expectedUsd = this.getPlanPriceForOrg(org, expectedPlan);
+      const expectedCents = Math.round(expectedUsd * 100);
 
       // Activate or renew 30-day subscription
       const now = new Date();
@@ -442,18 +475,21 @@ export class SubscriptionService {
   }
 
   /**
-   * Super Admin manually sets or modifies customer subscription (for Custom Plan & manual renewals)
+   * Super Admin manually sets or modifies customer subscription & custom pricing (add or minus USD)
    */
   static adminSetSubscription(
     adminUserId: string,
     organizationId: string,
     params: {
-      plan: 'starter' | 'enterprise' | 'custom';
-      subscriptionStatus: 'active' | 'trial_active' | 'expired';
+      plan?: 'starter' | 'enterprise' | 'custom';
+      subscriptionStatus?: 'active' | 'trial_active' | 'expired';
       maxDevices?: number;
       maxAgents?: number;
       priceUsd?: number;
       durationDays?: number;
+      customPricing?: { starter?: number; enterprise?: number; custom?: number };
+      priceAdjustmentUsd?: number;
+      pricingNote?: string;
     }
   ): { success: boolean; organization?: Organization; error?: string } {
     const org = inMemoryDb.organizations.get(organizationId);
@@ -463,29 +499,37 @@ export class SubscriptionService {
     const durationDays = params.durationDays || 30;
     const periodEnd = new Date(now.getTime() + durationDays * 24 * 3600 * 1000);
 
-    org.plan = params.plan;
-    org.subscription_status = params.subscriptionStatus;
-    org.max_devices = params.maxDevices || (params.plan === 'starter' ? 15 : params.plan === 'enterprise' ? 30 : 100);
-    org.max_agents = params.maxAgents || (params.plan === 'starter' ? 2 : params.plan === 'enterprise' ? 3 : 10);
-    org.current_period_start = now.toISOString();
-    org.current_period_end = periodEnd.toISOString();
+    if (params.plan) org.plan = params.plan;
+    if (params.subscriptionStatus) org.subscription_status = params.subscriptionStatus;
+    if (params.maxDevices !== undefined) org.max_devices = params.maxDevices;
+    if (params.maxAgents !== undefined) org.max_agents = params.maxAgents;
+    if (params.subscriptionStatus === 'active') {
+      org.current_period_start = now.toISOString();
+      org.current_period_end = periodEnd.toISOString();
+    }
     org.terms_accepted = true;
     org.terms_accepted_at = org.terms_accepted_at || now.toISOString();
-    if (params.priceUsd) org.custom_price_usd = params.priceUsd;
+    if (params.priceUsd !== undefined) org.custom_price_usd = params.priceUsd;
+    if (params.customPricing !== undefined) org.custom_pricing = params.customPricing;
+    if (params.priceAdjustmentUsd !== undefined) org.price_adjustment_usd = params.priceAdjustmentUsd;
+    if (params.pricingNote !== undefined) org.pricing_note = params.pricingNote;
     org.updated_at = now.toISOString();
 
     inMemoryDb.auditLogs.unshift({
       id: uuidv4(),
       organization_id: organizationId,
       user_id: adminUserId,
-      action: 'ADMIN_MANUALLY_SET_SUBSCRIPTION',
+      action: 'ADMIN_MANUALLY_SET_SUBSCRIPTION_AND_PRICING',
       resource_type: 'subscription',
       resource_id: organizationId,
       details: {
-        plan: params.plan,
-        status: params.subscriptionStatus,
+        plan: org.plan,
+        status: org.subscription_status,
         maxDevices: org.max_devices,
         maxAgents: org.max_agents,
+        customPricing: org.custom_pricing,
+        priceAdjustmentUsd: org.price_adjustment_usd,
+        pricingNote: org.pricing_note,
         periodEnd: org.current_period_end,
       },
       created_at: now.toISOString(),

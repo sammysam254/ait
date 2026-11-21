@@ -1065,8 +1065,16 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
                 {status}
               </span>
             </h2>
-            <div className="text-[10px] md:text-xs text-gray-400">
-              {device?.manufacturer} {device?.model} • Android {device?.android_version}
+            <div className="text-[10px] md:text-xs text-gray-400 flex items-center gap-1.5 flex-wrap">
+              <span>{device?.manufacturer} {device?.model} • Android {device?.android_version}</span>
+              {device?.adb_serial && (
+                <>
+                  <span>•</span>
+                  <span className="font-mono text-emerald-400 font-bold bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-500/30 select-all">
+                    SN: {device.adb_serial}
+                  </span>
+                </>
+              )}
             </div>
           </div>
         </div>

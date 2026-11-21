@@ -53,6 +53,9 @@ export interface Organization {
   last_payment_reference?: string;
   last_payment_amount?: number;
   custom_price_usd?: number;
+  custom_pricing?: { starter?: number; enterprise?: number; custom?: number };
+  price_adjustment_usd?: number;
+  pricing_note?: string;
   contact_phone?: string;
 }
 

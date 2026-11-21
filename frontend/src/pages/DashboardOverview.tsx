@@ -213,6 +213,12 @@ export const DashboardOverview: React.FC = () => {
                 </div>
 
                 <div className="text-xs text-gray-400 space-y-1 bg-gray-950/40 p-2.5 rounded-lg border border-gray-800/50">
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-500">Serial Number</span>
+                    <span className="font-mono text-emerald-400 font-bold select-all bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-500/30 text-[11px]">
+                      {device.adb_serial || 'Unknown'}
+                    </span>
+                  </div>
                   <div className="flex justify-between">
                     <span className="text-gray-500">Resolution</span>
                     <span>{device.screen_width}x{device.screen_height}</span>

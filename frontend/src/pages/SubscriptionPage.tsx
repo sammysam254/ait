@@ -166,6 +166,11 @@ export const SubscriptionPage: React.FC = () => {
   const status = subData?.status ?? 'terms_required';
   const isActive = subData?.active ?? false;
   const isSuperAdmin = user?.email === 'sammyseth260@gmail.com';
+  const starterPrice = subData?.starterPriceUsd ?? 80;
+  const enterprisePrice = subData?.enterprisePriceUsd ?? 100;
+  const hasCustomStarter = starterPrice !== 80;
+  const hasCustomEnterprise = enterprisePrice !== 100;
+  const pricingNote = subData?.pricingNote;
 
   return (
     <div className="space-y-8 max-w-6xl pb-16">
@@ -350,11 +355,24 @@ export const SubscriptionPage: React.FC = () => {
           <div className="p-6 rounded-3xl bg-gray-900/80 border border-gray-800 flex flex-col justify-between space-y-6 hover:border-gray-700 transition relative">
             <div className="space-y-4">
               <div className="space-y-1">
-                <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">Small Fleet</span>
-                <h3 className="text-lg font-bold text-white">Starter</h3>
-                <div className="text-3xl font-extrabold text-white">
-                  $80<span className="text-xs font-normal text-gray-400"> / month</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider">Small Fleet</span>
+                  {hasCustomStarter && (
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                      Custom Rate
+                    </span>
+                  )}
                 </div>
+                <h3 className="text-lg font-bold text-white">Starter</h3>
+                <div className="text-3xl font-extrabold text-white flex items-baseline gap-2">
+                  ${starterPrice}<span className="text-xs font-normal text-gray-400"> / month</span>
+                  {hasCustomStarter && (
+                    <span className="text-xs line-through text-gray-500 font-normal">$80</span>
+                  )}
+                </div>
+                {hasCustomStarter && pricingNote && (
+                  <p className="text-[11px] text-amber-400 font-medium">Note: {pricingNote}</p>
+                )}
                 <p className="text-xs text-gray-400">Supports up to 15 phones across 2 computer hosts</p>
               </div>
 
@@ -403,7 +421,7 @@ export const SubscriptionPage: React.FC = () => {
               >
                 <CreditCard className="h-4 w-4" />
                 <span>
-                  {actionLoading === 'pay-starter' ? 'Opening Paystack...' : 'Pay $80 / mo via Paystack'}
+                  {actionLoading === 'pay-starter' ? 'Opening Paystack...' : `Pay $${starterPrice} / mo via Paystack`}
                 </span>
               </button>
             </div>
@@ -417,11 +435,24 @@ export const SubscriptionPage: React.FC = () => {
 
             <div className="space-y-4">
               <div className="space-y-1">
-                <span className="text-[10px] font-bold text-purple-400 uppercase tracking-wider">Heavy Testing Rig</span>
-                <h3 className="text-lg font-bold text-white">Enterprise</h3>
-                <div className="text-3xl font-extrabold text-white">
-                  $100<span className="text-xs font-normal text-gray-400"> / month</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold text-purple-400 uppercase tracking-wider">Heavy Testing Rig</span>
+                  {hasCustomEnterprise && (
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                      Custom Rate
+                    </span>
+                  )}
                 </div>
+                <h3 className="text-lg font-bold text-white">Enterprise</h3>
+                <div className="text-3xl font-extrabold text-white flex items-baseline gap-2">
+                  ${enterprisePrice}<span className="text-xs font-normal text-gray-400"> / month</span>
+                  {hasCustomEnterprise && (
+                    <span className="text-xs line-through text-gray-500 font-normal">$100</span>
+                  )}
+                </div>
+                {hasCustomEnterprise && pricingNote && (
+                  <p className="text-[11px] text-amber-400 font-medium">Note: {pricingNote}</p>
+                )}
                 <p className="text-xs text-gray-400">Supports up to 30 phones across 3 computer hosts</p>
               </div>
 
@@ -457,7 +488,7 @@ export const SubscriptionPage: React.FC = () => {
               >
                 <CreditCard className="h-4 w-4" />
                 <span>
-                  {actionLoading === 'pay-enterprise' ? 'Opening Paystack...' : 'Pay $100 / mo via Paystack'}
+                  {actionLoading === 'pay-enterprise' ? 'Opening Paystack...' : `Pay $${enterprisePrice} / mo via Paystack`}
                 </span>
               </button>
             </div>
