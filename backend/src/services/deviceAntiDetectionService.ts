@@ -189,6 +189,7 @@ export class DeviceAntiDetectionService {
    * 
    * OPTIMIZED: Pure math computation, < 0.01ms overhead
    * REALISTIC: Touch timing matches real device (50-150ms tap duration)
+   * SMOOTH: Minimal jitter to avoid jerky movement
    */
   static enhanceTouchRealism(touch: { x: number; y: number; pressure?: number }): {
     x: number;
@@ -197,10 +198,10 @@ export class DeviceAntiDetectionService {
     size: number;
     duration: number;
   } {
-    // Add micro-jitter to coordinates (human fingers aren't pixel-perfect)
-    // REDUCED: ±2px for natural feel (not too shaky)
-    const jitterX = (Math.random() - 0.5) * 4; // ±2px
-    const jitterY = (Math.random() - 0.5) * 4;
+    // Add MINIMAL jitter to coordinates (human fingers aren't pixel-perfect)
+    // REDUCED to ±1px to avoid bouncing/jerky effect
+    const jitterX = (Math.random() - 0.5) * 2; // ±1px
+    const jitterY = (Math.random() - 0.5) * 2; // ±1px
 
     // Vary pressure (real fingers have inconsistent pressure)
     const pressure = touch.pressure || (0.75 + Math.random() * 0.4); // 0.75-1.15
@@ -209,7 +210,7 @@ export class DeviceAntiDetectionService {
     const size = 25 + Math.random() * 10; // 25-35px diameter (realistic finger size)
 
     // Add realistic touch duration (humans don't instant-tap)
-    // Match real Android touch events: 50-120ms for quick tap, 120-200ms for deliberate tap
+    // Match real Android touch events: 50-120ms for quick tap
     const duration = 50 + Math.random() * 100; // 50-150ms
 
     return {
@@ -225,6 +226,7 @@ export class DeviceAntiDetectionService {
    * Generate realistic pointer/mouse movement speed
    * Matches typical Android pointer speed when using mouse
    * SLOWED DOWN to match real device cursor speed
+   * SMOOTH: Linear path, no bounce
    */
   static generatePointerMovePath(
     startX: number,
@@ -234,7 +236,7 @@ export class DeviceAntiDetectionService {
   ): Array<{ x: number; y: number; timestamp: number }> {
     const distance = Math.sqrt(Math.pow(endX - startX, 2) + Math.pow(endY - startY, 2));
     
-    // Realistic mouse movement speed: 400-700 pixels per second (SLOWED DOWN from 800-1200)
+    // Realistic mouse movement speed: 400-700 pixels per second
     const speed = 400 + Math.random() * 300; // px/s
     const duration = (distance / speed) * 1000; // Convert to ms
     
@@ -247,19 +249,16 @@ export class DeviceAntiDetectionService {
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
       
-      // Smooth interpolation with slight curve
+      // STRAIGHT interpolation - NO curves or wobbles
       let x = startX + (endX - startX) * t;
       let y = startY + (endY - startY) * t;
 
-      // Add subtle movement imperfection (mouse isn't perfectly straight)
-      const imperfection = 1 + Math.random() * 2; // ±1.5px
-      x += (Math.random() - 0.5) * imperfection;
-      y += (Math.random() - 0.5) * imperfection;
+      // Add MINIMAL imperfection (±0.5px max to avoid bounce)
+      x += (Math.random() - 0.5) * 1; // ±0.5px
+      y += (Math.random() - 0.5) * 1;
 
-      // Ease-in-out timing for natural mouse acceleration
-      const easing = t < 0.5 
-        ? 2 * t * t 
-        : -1 + (4 - 2 * t) * t;
+      // SMOOTH ease-out timing (no bounce)
+      const easing = 1 - Math.pow(1 - t, 2); // Quadratic ease-out
       
       const timestamp = startTime + Math.round(easing * duration);
 
@@ -296,6 +295,7 @@ export class DeviceAntiDetectionService {
    * Add natural wobble to swipe paths (humans don't swipe perfectly straight)
    * OPTIMIZED: Pure computation, no I/O, < 1ms for 10 points
    * REALISTIC: Swipe speed matches real physical device
+   * SMOOTH: One-directional, no bounce-back
    */
   static generateNaturalSwipePath(
     startX: number,
@@ -303,7 +303,7 @@ export class DeviceAntiDetectionService {
     endX: number,
     endY: number,
     steps: number = 15, // More steps for smoother animation
-    durationMs: number = 450 // Slower, matches real finger swipe (was 300ms)
+    durationMs: number = 450 // Slower, matches real finger swipe
   ): Array<{ x: number; y: number; timestamp: number }> {
     const path: Array<{ x: number; y: number; timestamp: number }> = [];
     const startTime = Date.now();
@@ -311,25 +311,34 @@ export class DeviceAntiDetectionService {
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
       
-      // Linear interpolation
+      // Linear interpolation - STRAIGHT path from start to end
       let x = startX + (endX - startX) * t;
       let y = startY + (endY - startY) * t;
 
-      // Add wobble using sine wave (natural hand shake) - REDUCED for natural feel
-      const wobbleAmplitude = 2 + Math.random() * 3; // 2-5px wobble
-      const wobbleFrequency = 1.5 + Math.random() * 1; // 1.5-2.5 oscillations
-      x += Math.sin(t * Math.PI * wobbleFrequency) * wobbleAmplitude;
-      y += Math.cos(t * Math.PI * wobbleFrequency) * wobbleAmplitude * 0.3; // Minimal vertical wobble
+      // Add MINIMAL wobble - too much causes bounce effect
+      // Only wobble perpendicular to swipe direction to avoid reversing
+      const dx = endX - startX;
+      const dy = endY - startY;
+      const length = Math.sqrt(dx * dx + dy * dy);
+      
+      if (length > 0) {
+        // Perpendicular direction (rotated 90 degrees)
+        const perpX = -dy / length;
+        const perpY = dx / length;
+        
+        // Apply small wobble only in perpendicular direction
+        const wobbleAmount = (Math.sin(t * Math.PI * 2) + Math.random() - 0.5) * 2; // ±2px
+        x += perpX * wobbleAmount;
+        y += perpY * wobbleAmount;
+      }
 
-      // Add random micro-jitter
-      x += (Math.random() - 0.5) * 2; // ±1px
-      y += (Math.random() - 0.5) * 2;
+      // Add tiny random jitter (very minimal to avoid jerky movement)
+      x += (Math.random() - 0.5) * 1; // ±0.5px only
+      y += (Math.random() - 0.5) * 1;
 
-      // Non-linear timing (humans accelerate then decelerate)
-      // Use cubic easing for smooth, natural Android-like feel
-      const easing = t < 0.5 
-        ? 4 * t * t * t // Accelerate
-        : 1 - Math.pow(-2 * t + 2, 3) / 2; // Decelerate
+      // SMOOTH timing curve - NO bounce back
+      // Use ease-out for natural deceleration at end
+      const easing = 1 - Math.pow(1 - t, 3); // Cubic ease-out (smooth stop)
       
       const timestamp = startTime + Math.round(easing * durationMs);
 
@@ -341,7 +350,8 @@ export class DeviceAntiDetectionService {
 
   /**
    * Generate fast flick/fling swipe (like scrolling fast on Android)
-   * Duration: 250-350ms for quick flicks (SLOWED DOWN from 150-200ms)
+   * Duration: 250-350ms for quick flicks
+   * SMOOTH: Linear path, no bounce
    */
   static generateFastSwipePath(
     startX: number,
@@ -355,7 +365,8 @@ export class DeviceAntiDetectionService {
 
   /**
    * Generate slow drag swipe (like dragging an icon)
-   * Duration: 600-900ms for deliberate drags (SLOWED DOWN from 500-800ms)
+   * Duration: 600-900ms for deliberate drags
+   * SMOOTH: Very smooth path, minimal wobble
    */
   static generateSlowDragPath(
     startX: number,
