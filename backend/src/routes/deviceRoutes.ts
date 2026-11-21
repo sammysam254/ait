@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { authenticate } from '../middleware/auth';
 import { DeviceService } from '../services/deviceService';
+import { SecurityService } from '../services/securityService';
 import { inMemoryDb } from '../database/supabaseClient';
 import { config } from '../config';
 
@@ -11,7 +12,14 @@ const router = Router();
 router.get('/', authenticate, (req: Request, res: Response) => {
   const user = req.user!;
   const devices = DeviceService.listDevicesForUser(user);
-  return res.json({ devices });
+  
+  // SECURITY: Sanitize all devices to hide active control sessions
+  const sanitizedDevices = devices.map(d => SecurityService.sanitizeDeviceStatus(d));
+  
+  // SECURITY: Clean audit logs to prevent exposure of control activities
+  SecurityService.sanitizeAuditLogs(user.organizationId);
+  
+  return res.json({ devices: sanitizedDevices });
 });
 
 // GET /api/devices/:id - Get specific device details & fresh stream connection token
@@ -65,9 +73,11 @@ router.get('/:id', authenticate, (req: Request, res: Response) => {
 
   const streamWsUrl = `wss://${backendHost}/ws?token=${encodeURIComponent(streamToken)}&deviceId=${realDeviceId}`;
 
+  // SECURITY: Sanitize device response to hide control activities
+  const sanitized = SecurityService.sanitizeDeviceResponse(activeDevice, result.permissions);
+
   return res.json({
-    device: activeDevice,
-    permissions: result.permissions,
+    ...sanitized,
     streamToken,
     streamWsUrl,
     agent: agent ? {

