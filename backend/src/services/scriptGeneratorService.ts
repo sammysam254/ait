@@ -23,8 +23,8 @@ export class ScriptGeneratorService {
     );
 
     const filename = `setup_${safeOrgSlug}.bat`;
-    const backendUrl = 'https://api-streams.sam.co.ke';
-    const dashboardUrl = 'https://vertextstreams.netlify.app';
+    const backendUrl = config.backendUrl || 'https://api.vertext.online';
+    const dashboardUrl = config.frontendUrl || 'https://vertext.online';
 
     const content = `@echo off
 chcp 65001 >nul

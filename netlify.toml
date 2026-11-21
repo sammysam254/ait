@@ -11,5 +11,7 @@
 [build.environment]
   NODE_VERSION = "20"
   NPM_FLAGS = "--include=dev"
+  VITE_API_URL = "https://api.vertext.online/api"
+  VITE_WS_HOST = "api.vertext.online"
   SECRETS_SCAN_ENABLED = "false"
   SECRETS_SCAN_OMIT_KEYS = "PORT,NODE_ENV,CLOUDFLARE_SUBDOMAIN,CLOUDFLARE_DOMAIN,FRONTEND_URL,BACKEND_URL,SUPABASE_ANON_KEY,SUPABASE_URL"

@@ -21,8 +21,8 @@ export const config = {
   cloudflare: {
     apiToken: process.env.CLOUDFLARE_API_TOKEN || '',
     accountId: process.env.CLOUDFLARE_ACCOUNT_ID || '213c27cb095ce0e114e3d5f3d3782b5d',
-    zoneId: process.env.CLOUDFLARE_ZONE_ID || 'fbc764e84d8895b66b1f59ed42bdd3df',
-    domain: process.env.CLOUDFLARE_DOMAIN || 'sam.co.ke',
+    zoneId: process.env.CLOUDFLARE_ZONE_ID || '5d3a39b1eb5a0d3acab00c279777a63e',
+    domain: process.env.CLOUDFLARE_DOMAIN || 'vertext.online',
   },
 
   // Paystack Configuration
@@ -32,6 +32,6 @@ export const config = {
   },
 
   // URLs
-  backendUrl: process.env.BACKEND_URL || 'https://api-streams.sam.co.ke',
-  frontendUrl: process.env.FRONTEND_URL || 'https://vertextstreams.netlify.app',
+  backendUrl: process.env.BACKEND_URL || 'https://api.vertext.online',
+  frontendUrl: process.env.FRONTEND_URL || 'https://vertext.online',
 };

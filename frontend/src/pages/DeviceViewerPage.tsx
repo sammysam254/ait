@@ -472,7 +472,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
       });
       setCanControl(shareAllowControl ?? true);
       const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
+      const wsHost = import.meta.env.VITE_WS_HOST || 'api.vertext.online';
       const wsUrl = `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(shareSessionToken!)}&deviceId=${shareDeviceId}`;
       connectStream(wsUrl, shareSessionToken!);
     } else if (id) {
@@ -561,7 +561,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
     const currentDeviceId = activeDeviceIdRef.current || id || shareDeviceId;
     const token = serverToken || (isPublicShare ? shareSessionToken : localStorage.getItem('vtx_token'));
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsHost = import.meta.env.VITE_WS_HOST || 'api-streams.sam.co.ke';
+    const wsHost = import.meta.env.VITE_WS_HOST || 'api.vertext.online';
     const wsUrl = serverWsUrl || `${wsProto}//${wsHost}/ws?token=${encodeURIComponent(token || '')}&deviceId=${currentDeviceId}`;
 
     setStatus((prev) => (prev === 'connected' ? 'connected' : 'connecting'));
@@ -723,26 +723,13 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
             activeStreamDimsRef.current = spsDims;
             setStreamDimensions(spsDims);
 
-            // Re-create JMuxer cleanly so it parses the new SPS and allocates a matching SourceBuffer
+            // Cleanly reset JMuxer so it parses the new SPS and allocates a matching SourceBuffer
             if (jmuxerRef.current) {
-              try { jmuxerRef.current.destroy(); } catch (e) {}
-              jmuxerRef.current = null;
-            }
-            if (videoRef.current) {
-              videoRef.current.pause();
-              videoRef.current.removeAttribute('src');
-              videoRef.current.load();
               try {
-                jmuxerRef.current = new JMuxer({
-                  node: videoRef.current,
-                  mode: 'video',
-                  flushingTime: 0,
-                  fps: 60,
-                  clearBuffer: true,
-                  debug: false,
-                });
-                if (typeof jmuxerRef.current.stopInterval === 'function') {
-                  jmuxerRef.current.stopInterval();
+                if (typeof jmuxerRef.current.reset === 'function') {
+                  jmuxerRef.current.reset();
+                } else if (typeof jmuxerRef.current.clearBuffer === 'function') {
+                  jmuxerRef.current.clearBuffer();
                 }
               } catch (err) {}
             }
@@ -1600,6 +1587,12 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
           <button
             onClick={() => {
               sendInput('rotate');
+              // Instant optimistic aspect ratio flip for 0ms visual feedback
+              if (streamDimensions?.width && streamDimensions?.height) {
+                const flipped = { width: streamDimensions.height, height: streamDimensions.width };
+                activeStreamDimsRef.current = flipped;
+                setStreamDimensions(flipped);
+              }
             }}
             disabled={!canControl}
             className="p-2 md:p-2.5 rounded-xl hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition active:scale-90 active:bg-indigo-500/30"

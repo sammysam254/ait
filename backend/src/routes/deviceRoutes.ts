@@ -65,7 +65,7 @@ router.get('/:id', authenticate, (req: Request, res: Response) => {
     { expiresIn: '24h' }
   );
 
-  let backendHost = 'api-streams.sam.co.ke';
+  let backendHost = 'api.vertext.online';
   try {
     const parsed = new URL(config.backendUrl);
     backendHost = parsed.host;

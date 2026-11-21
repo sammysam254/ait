@@ -105,7 +105,7 @@ export function loadAgentConfig(): AgentConfig {
   const scrcpyServerPath = path.join(scrcpyDir, 'scrcpy-server');
 
   return {
-    backendUrl: savedConfig.backendUrl || process.env.BACKEND_URL || 'https://api-streams.sam.co.ke',
+    backendUrl: savedConfig.backendUrl || process.env.BACKEND_URL || 'https://api.vertext.online',
     agentId: savedConfig.agentId || process.env.AGENT_ID,
     agentAuthToken: savedConfig.agentAuthToken || process.env.AGENT_AUTH_TOKEN,
     organizationId: savedConfig.organizationId || process.env.ORGANIZATION_ID,

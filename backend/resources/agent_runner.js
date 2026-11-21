@@ -72,7 +72,7 @@ console.log('[Agent] Working directory   :', agentDir);
 // Read config & credentials
 function loadConfig() {
   let cfg = {
-    backendUrl: 'https://api-streams.sam.co.ke',
+    backendUrl: 'https://api.vertext.online',
     computerName: process.env.COMPUTERNAME || 'VERTEXT',
     organizationId: 'aaaa0000-0000-0000-0000-000000000001',
   };
@@ -83,6 +83,11 @@ function loadConfig() {
       const parsed = JSON.parse(fs.readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '').trim());
       cfg = { ...cfg, ...parsed };
     } catch (e) {}
+  }
+
+  // Auto-upgrade legacy host references to vertext.online
+  if (cfg.backendUrl && (cfg.backendUrl.includes('sam.co.ke') || cfg.backendUrl.includes('netlify.app'))) {
+    cfg.backendUrl = 'https://api.vertext.online';
   }
 
   const credFile = path.join(agentDir, 'agent_credentials.json');
@@ -639,38 +644,38 @@ async function injectInput(serial, action, data) {
           } catch (e) {}
           return true;
         case 'rotate': {
-          const curRot = deviceRotations.get(serial) || 0;
-          // Clean 2-way instant toggle: Portrait (0) <-> Landscape (1)
-          const nextRot = (curRot === 1) ? 0 : 1;
-          deviceRotations.set(serial, nextRot);
-
-          // 1. Force Android system orientation lock cleanly via wm user-rotation and settings
-          sendShellInput(serial, `wm user-rotation lock ${nextRot}; settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
-
-          // 2. Also send native scrcpy SC_CONTROL_MSG_TYPE_ROTATE_DEVICE (type 11)
-          try {
-            sock.write(Buffer.from([11]));
-          } catch (e) {}
-
-          // 3. Request fresh IDR keyframe at 100ms, 250ms, and 450ms so video encoder outputs the new SPS/IDR immediately
-          setTimeout(() => {
-            const s = controlSockets.get(serial);
-            if (s && !s.destroyed) {
-              try { s.write(Buffer.from([17])); } catch (e) {}
+          execFile(adbPath, ['-s', serial, 'shell', 'settings get system user_rotation'], (err, stdout) => {
+            let cur = parseInt(stdout ? stdout.trim() : '', 10);
+            if (isNaN(cur)) {
+              cur = deviceRotations.get(serial) || 0;
             }
-          }, 100);
-          setTimeout(() => {
-            const s = controlSockets.get(serial);
-            if (s && !s.destroyed) {
-              try { s.write(Buffer.from([17])); } catch (e) {}
-            }
-          }, 250);
-          setTimeout(() => {
-            const s = controlSockets.get(serial);
-            if (s && !s.destroyed) {
-              try { s.write(Buffer.from([17])); } catch (e) {}
-            }
-          }, 450);
+            // Instant 2-way toggle: Portrait (0/2) <-> Landscape (1/3)
+            const nextRot = (cur === 1 || cur === 3) ? 0 : 1;
+            deviceRotations.set(serial, nextRot);
+
+            // 1. Force Android system orientation cleanly via settings & wm user-rotation
+            sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}; wm user-rotation lock ${nextRot}`);
+
+            // 2. Request fresh IDR keyframes so video encoder outputs the new SPS/IDR immediately
+            setTimeout(() => {
+              const s = controlSockets.get(serial);
+              if (s && !s.destroyed) {
+                try { s.write(Buffer.from([17])); } catch (e) {}
+              }
+            }, 120);
+            setTimeout(() => {
+              const s = controlSockets.get(serial);
+              if (s && !s.destroyed) {
+                try { s.write(Buffer.from([17])); } catch (e) {}
+              }
+            }, 300);
+            setTimeout(() => {
+              const s = controlSockets.get(serial);
+              if (s && !s.destroyed) {
+                try { s.write(Buffer.from([17])); } catch (e) {}
+              }
+            }, 600);
+          });
           return true;
         }
       }

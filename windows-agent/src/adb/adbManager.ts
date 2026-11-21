@@ -213,7 +213,9 @@ export class AdbManager {
         case 'rotate': {
           // Toggle rotation: 0 (portrait) or 1 (landscape)
           const target = data?.orientation === 'landscape' ? '1' : '0';
+          await this.runAdb(['-s', serial, 'shell', 'settings', 'put', 'system', 'accelerometer_rotation', '0']);
           await this.runAdb(['-s', serial, 'shell', 'settings', 'put', 'system', 'user_rotation', target]);
+          await this.runAdb(['-s', serial, 'shell', 'wm', 'user-rotation', 'lock', target]);
           return true;
         }
 
