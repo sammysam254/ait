@@ -3,6 +3,7 @@ import { authenticate, requireRole } from '../middleware/auth';
 import { inMemoryDb } from '../database/supabaseClient';
 import { SecurityService } from '../services/securityService';
 import { DeviceAntiDetectionService } from '../services/deviceAntiDetectionService';
+import { AdvancedAntiDetectionService } from '../services/advancedAntiDetectionService';
 
 const router = Router();
 
@@ -203,6 +204,46 @@ router.post('/fix-device-risks', async (req: Request, res: Response) => {
       message: 'Detection risks fixed',
       result 
     });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/deploy-advanced-stealth - Deploy all advanced stealth techniques
+router.post('/deploy-advanced-stealth', async (req: Request, res: Response) => {
+  const { deviceSerial } = req.body;
+  
+  if (!deviceSerial) {
+    return res.status(400).json({ error: 'deviceSerial is required' });
+  }
+
+  try {
+    // Deploy gradually in background
+    AdvancedAntiDetectionService.gradualStealthDeployment(deviceSerial).catch(() => {});
+    
+    return res.json({ 
+      success: true,
+      message: 'Advanced stealth deployment initiated (gradual over 50 seconds)',
+      estimated_completion: new Date(Date.now() + 50000).toISOString(),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/check-stealth-detection/:deviceSerial - Check if stealth was detected
+router.get('/check-stealth-detection/:deviceSerial', async (req: Request, res: Response) => {
+  const { deviceSerial } = req.params;
+
+  try {
+    const result = await AdvancedAntiDetectionService.checkDeploymentDetection(deviceSerial);
+    
+    if (result.detected) {
+      // Auto-trigger emergency reset
+      AdvancedAntiDetectionService.emergencyStealthReset(deviceSerial).catch(() => {});
+    }
+    
+    return res.json(result);
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
