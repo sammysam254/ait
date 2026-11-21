@@ -906,28 +906,15 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
     const speed = dist / dt; // pixels per ms
 
     // Gesture detection:
-    // 1. Instant Tap: minimal movement (< 10px) and quick duration (< 350ms)
-    // 2. Natural Swipe / Flick: displacement >= 15px with fast flick duration (< 400ms or speed > 0.20 px/ms)
+    // Tap: minimal movement (< 10px) and quick duration (< 350ms)
     const isTap = dist < 10 && dt < 350;
-    const isFlick = !isTap && dist >= 15 && (dt < 400 || speed > 0.20);
 
     if (isTap) {
       // Pure instant tap dispatched at exact down coordinates
       sendInput('touch_up', { x: startX, y: startY, isTap: true });
-    } else if (isFlick) {
-      // Natural flick gesture: carries release velocity to trigger Android's native smooth fling physics
-      sendInput('touch_up', {
-        x: endX,
-        y: endY,
-        isFlick: true,
-        dx,
-        dy,
-        dist,
-        speed,
-        dt,
-      });
     } else {
-      // Sustained manual drag or hold release
+      // Real physical release at exact current coordinates
+      // Android's native touch framework computes momentum from the real preceding touch_move events
       sendInput('touch_up', { x: endX, y: endY });
     }
 
