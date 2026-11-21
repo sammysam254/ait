@@ -494,6 +494,8 @@ export class ApiService {
       reference: string;
       amountCents: number;
       amountUsd: number;
+      amountKes?: number;
+      currency?: string;
       publicKey: string;
       email: string;
       plan: string;

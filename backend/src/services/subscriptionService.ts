@@ -356,22 +356,33 @@ export class SubscriptionService {
   }
 
   /**
+   * Currency exchange rate: 1 USD = 134 KES
+   * In Paystack, amounts are submitted in currency sub-units (1 KES = 100 cents).
+   * In the frontend UI, customer is shown USD only ($80 / $100).
+   * The backend converts the figure to KES sub-units for Paystack.
+   */
+  public static readonly USD_TO_KES_RATE = 134;
+
+  /**
    * Initializes a Paystack in-app payment transaction reference
    */
   static initializePayment(
     organizationId: string,
     userEmail: string,
     plan: 'starter' | 'enterprise'
-  ): { reference: string; amountCents: number; amountUsd: number; publicKey: string; email: string; plan: string } {
+  ): { reference: string; amountCents: number; amountUsd: number; amountKes: number; currency: string; publicKey: string; email: string; plan: string } {
     const org = inMemoryDb.organizations.get(organizationId);
     const amountUsd = this.getPlanPriceForOrg(org, plan);
-    const amountCents = Math.round(amountUsd * 100); // Paystack takes currency sub-units (e.g. 8000 for $80 USD)
+    const amountKes = Math.round(amountUsd * this.USD_TO_KES_RATE);
+    const amountCents = Math.round(amountKes * 100); // Paystack takes currency sub-units (1 KES = 100 cents)
     const reference = `VTX_${plan.toUpperCase()}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     return {
       reference,
       amountCents,
       amountUsd,
+      amountKes,
+      currency: 'KES',
       publicKey: config.paystack.publicKey,
       email: userEmail,
       plan,
@@ -421,9 +432,19 @@ export class SubscriptionService {
         };
       }
 
-      // Check paid amount against effective organization plan price
+      // Check paid amount against effective organization plan price (converted to KES cents or USD cents)
       const expectedUsd = this.getPlanPriceForOrg(org, expectedPlan);
-      const expectedCents = Math.round(expectedUsd * 100);
+      const expectedKes = Math.round(expectedUsd * this.USD_TO_KES_RATE);
+      const expectedKesCents = Math.round(expectedKes * 100);
+      const expectedUsdCents = Math.round(expectedUsd * 100);
+
+      const paidAmount = txData.amount || 0;
+      if (paidAmount < expectedKesCents && paidAmount < expectedUsdCents) {
+        return {
+          success: false,
+          error: `Paid amount (${paidAmount}) is less than the required subscription amount.`,
+        };
+      }
 
       // Activate or renew 30-day subscription
       const now = new Date();
@@ -445,7 +466,7 @@ export class SubscriptionService {
       org.terms_accepted = true;
       org.terms_accepted_at = org.terms_accepted_at || now.toISOString();
       org.last_payment_reference = reference;
-      org.last_payment_amount = (txData.amount || expectedCents) / 100;
+      org.last_payment_amount = expectedUsd;
       org.updated_at = now.toISOString();
 
       inMemoryDb.auditLogs.unshift({

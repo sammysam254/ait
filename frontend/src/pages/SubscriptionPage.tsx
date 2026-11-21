@@ -135,8 +135,8 @@ export const SubscriptionPage: React.FC = () => {
         key: paystackKey,
         publicKey: paystackKey,
         email: initData.email || user?.email,
-        amount: initData.amountCents, // 8000 cents ($80 USD) or 10000 cents ($100 USD)
-        currency: 'USD',
+        amount: initData.amountCents, // Converted into KES sub-units in code
+        currency: initData.currency || 'KES',
         ref: initData.reference,
         metadata: {
           organization_id: subData?.organizationId || user?.organizationId,

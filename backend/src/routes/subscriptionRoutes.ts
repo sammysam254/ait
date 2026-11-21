@@ -105,7 +105,8 @@ router.post('/paystack-webhook', async (req: Request, res: Response) => {
     const reference = data.reference;
     // Extract metadata
     const orgId = data.metadata?.organization_id;
-    const plan = data.metadata?.plan || (data.amount >= 10000 ? 'enterprise' : 'starter');
+    // 100 USD * 134 KES * 100 = 1,340,000 KES cents (or 10,000 USD cents)
+    const plan = data.metadata?.plan || (data.amount >= 1340000 || (data.currency === 'USD' && data.amount >= 10000) ? 'enterprise' : 'starter');
 
     if (orgId && reference) {
       await SubscriptionService.verifyPaystackPayment(orgId, 'system_webhook', reference, plan);
