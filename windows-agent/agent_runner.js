@@ -523,24 +523,26 @@ async function injectInput(serial, action, data) {
           return true;
         case 'rotate': {
           const curRot = deviceRotations.get(serial) || 0;
-          const nextRot = (curRot + 1) % 4; // Cycle 0 -> 1 -> 2 -> 3
+          // Clean 2-way instant toggle: Portrait (0) <-> Landscape (1)
+          const nextRot = (curRot === 1) ? 0 : 1;
           deviceRotations.set(serial, nextRot);
 
-          // 1. Send native scrcpy SC_CONTROL_MSG_TYPE_ROTATE_DEVICE (type 11)
-          try {
-            sock.write(Buffer.from([11]));
-          } catch (e) {}
-
-          // 2. Lock Android orientation to prevent auto-rotate sensor snap-back
+          // 1. Lock Android system rotation cleanly (no conflicting scrcpy command)
           sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
 
-          // 3. Request keyframe after rotation completes so video player gets fresh SPS/PPS
+          // 2. Request fresh IDR keyframe at 80ms and 220ms so browser switches instantly with zero lag
           setTimeout(() => {
             const s = controlSockets.get(serial);
             if (s && !s.destroyed) {
               try { s.write(Buffer.from([17])); } catch (e) {}
             }
-          }, 350);
+          }, 80);
+          setTimeout(() => {
+            const s = controlSockets.get(serial);
+            if (s && !s.destroyed) {
+              try { s.write(Buffer.from([17])); } catch (e) {}
+            }
+          }, 220);
           return true;
         }
       }
@@ -610,7 +612,7 @@ async function injectInput(serial, action, data) {
         return true;
       case 'rotate': {
         const curRot = deviceRotations.get(serial) || 0;
-        const nextRot = (curRot + 1) % 4;
+        const nextRot = (curRot === 1) ? 0 : 1;
         deviceRotations.set(serial, nextRot);
         sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
         return true;

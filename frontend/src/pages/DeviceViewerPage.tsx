@@ -1204,7 +1204,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
               : '9 / 19.5',
             touchAction: 'none',
           }}
-          className="relative h-full max-h-[calc(100dvh-70px)] md:max-h-[calc(100vh-140px)] w-auto max-w-full rounded-lg md:rounded-3xl bg-black border border-gray-800/80 md:border-4 md:border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center transition-all duration-200"
+          className="relative max-h-[calc(100dvh-70px)] md:max-h-[calc(100vh-140px)] w-auto max-w-full rounded-lg md:rounded-3xl bg-black border border-gray-800/80 md:border-4 md:border-gray-800 shadow-2xl overflow-hidden flex items-center justify-center transition-all duration-200"
         >
           {/* Hardware Accelerated ws-scrcpy Video Player */}
           <video
@@ -1411,9 +1411,17 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
 
           <div className="w-4 h-[1px] bg-gray-700/80 my-0.5"></div>
 
-          {/* Rotate Orientation */}
+          {/* Rotate Orientation: instant 2-way toggle (Portrait <-> Landscape) */}
           <button
-            onClick={() => sendInput('rotate')}
+            onClick={() => {
+              sendInput('rotate');
+              setTimeout(() => {
+                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  const currentDeviceId = activeDeviceIdRef.current || id;
+                  wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: currentDeviceId }));
+                }
+              }, 120);
+            }}
             disabled={!canControl}
             className="p-2 md:p-2.5 rounded-xl hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition active:scale-90 active:bg-indigo-500/30"
             title="Rotate Screen Orientation"
