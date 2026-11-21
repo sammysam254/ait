@@ -183,6 +183,7 @@ function captureScreenshot(serial) {
 // Persistent interactive ADB shell and native scrcpy control sockets
 const shellSessions = new Map(); // serial -> ChildProcess
 const controlSockets = new Map(); // serial -> net.Socket
+const lastShellTouch = new Map(); // serial -> { x, y, time }
 const deviceDimensions = new Map(); // serial -> { width, height }
 
 function getDeviceShell(serial) {
@@ -512,25 +513,35 @@ async function injectInput(serial, action, data) {
     switch (action) {
       case 'scroll': {
         const v = data.vScroll || 0;
-        const startY = v < 0 ? 1100 : 500;
-        const endY = v < 0 ? 400 : 1200;
-        sendShellInput(serial, `input swipe 360 ${startY} 360 ${endY} 150`);
+        const startY = v < 0 ? Math.round(targetH * 0.7) : Math.round(targetH * 0.3);
+        const endY = v < 0 ? Math.round(targetH * 0.3) : Math.round(targetH * 0.7);
+        sendShellInput(serial, `input swipe ${Math.round(targetW / 2)} ${startY} ${Math.round(targetW / 2)} ${endY} 150`);
         return true;
       }
       case 'tap': {
-        const x = Math.round(data.x);
-        const y = Math.round(data.y);
         sendShellInput(serial, `input tap ${x} ${y}`);
         return true;
       }
-      case 'touch_down':
-      case 'touch_move':
+      case 'touch_down': {
+        lastShellTouch.set(serial, { x, y, time: Date.now() });
         return true;
-      case 'touch_up':
-        if (data && data.isTap) {
-          sendShellInput(serial, `input tap ${Math.round(data.x)} ${Math.round(data.y)}`);
+      }
+      case 'touch_move': {
+        return true;
+      }
+      case 'touch_up': {
+        const start = lastShellTouch.get(serial) || { x, y, time: Date.now() };
+        lastShellTouch.delete(serial);
+        const dx = Math.abs(x - start.x);
+        const dy = Math.abs(y - start.y);
+        const dur = Math.max(80, Math.min(450, Date.now() - start.time));
+        if ((data && data.isTap) || (dx < 15 && dy < 15)) {
+          sendShellInput(serial, `input tap ${x} ${y}`);
+        } else {
+          sendShellInput(serial, `input swipe ${start.x} ${start.y} ${x} ${y} ${dur}`);
         }
         return true;
+      }
       case 'swipe': {
         const { startX, startY, endX, endY, durationMs } = data;
         const dur = Math.max(100, Math.round(durationMs || 150));
