@@ -33,6 +33,7 @@ export class AssignmentService {
             assignmentId: da.id,
             deviceId: da.device_id,
             deviceName: dev?.device_name || 'Android Device',
+            adbSerial: dev?.adb_serial || da.device_id,
             model: dev?.model || 'Generic',
             status: dev?.status || 'offline',
             canView: da.can_view,

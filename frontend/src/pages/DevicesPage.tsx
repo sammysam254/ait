@@ -312,7 +312,7 @@ export const DevicesPage: React.FC = () => {
             <div className="flex items-center justify-between border-b border-gray-800 pb-3">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <Share2 className="h-4 w-4 text-indigo-400" />
-                <span>Share {shareModalDevice.device_name}</span>
+                <span>Share {shareModalDevice.device_name} (SN: {shareModalDevice.adb_serial})</span>
               </h3>
               <button
                 onClick={() => setShareModalDevice(null)}
@@ -421,7 +421,7 @@ export const DevicesPage: React.FC = () => {
             <div className="flex items-center justify-between border-b border-gray-800 pb-3">
               <h3 className="text-base font-bold text-white flex items-center gap-2">
                 <UserPlus className="h-4 w-4 text-indigo-400" />
-                <span>Assign {assignModalDevice.device_name}</span>
+                <span>Assign {assignModalDevice.device_name} (SN: {assignModalDevice.adb_serial})</span>
               </h3>
               <button
                 onClick={() => setAssignModalDevice(null)}

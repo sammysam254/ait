@@ -25,6 +25,7 @@ interface ExtendedAssignedUser extends AssignedUser {
     assignmentId: string;
     deviceId: string;
     deviceName: string;
+    adbSerial?: string;
     model: string;
     status: string;
     canView: boolean;
@@ -260,6 +261,11 @@ export const AssignedUsersPage: React.FC = () => {
                             <div className="flex items-center gap-1.5 truncate">
                               <Smartphone className="h-3 w-3 text-indigo-400 shrink-0" />
                               <span className="font-medium text-gray-200 truncate">{d.deviceName}</span>
+                              {d.adbSerial && (
+                                <span className="font-mono text-emerald-400 font-bold text-[9px] bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-500/30 shrink-0 select-all">
+                                  {d.adbSerial}
+                                </span>
+                              )}
                               <span className="text-[10px] text-gray-500">({d.canControl ? 'Control' : 'View'})</span>
                             </div>
 
@@ -443,7 +449,7 @@ export const AssignedUsersPage: React.FC = () => {
                 >
                   {devices.map((d) => (
                     <option key={d.id} value={d.id}>
-                      {d.device_name} ({d.model}) • {d.status}
+                      {d.device_name} ({d.model}) • SN: {d.adb_serial} • {d.status}
                     </option>
                   ))}
                 </select>
