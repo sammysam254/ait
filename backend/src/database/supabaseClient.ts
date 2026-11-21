@@ -38,11 +38,22 @@ export interface Organization {
   name: string;
   slug: string;
   owner_id: string;
-  plan: 'starter' | 'pro' | 'enterprise';
+  plan: 'starter' | 'pro' | 'enterprise' | 'custom';
   max_devices: number;
   max_agents: number;
   created_at: string;
   updated_at: string;
+  subscription_status?: 'trial_active' | 'active' | 'past_due' | 'expired' | 'terms_required';
+  trial_started_at?: string;
+  trial_ends_at?: string;
+  current_period_start?: string;
+  current_period_end?: string;
+  terms_accepted?: boolean;
+  terms_accepted_at?: string;
+  last_payment_reference?: string;
+  last_payment_amount?: number;
+  custom_price_usd?: number;
+  contact_phone?: string;
 }
 
 export interface Agent {
@@ -267,6 +278,11 @@ class InMemoryDatabase {
       plan: 'enterprise',
       max_devices: 1000,
       max_agents: 100,
+      subscription_status: 'active',
+      terms_accepted: true,
+      terms_accepted_at: new Date().toISOString(),
+      current_period_start: new Date().toISOString(),
+      current_period_end: new Date(Date.now() + 3650 * 24 * 3600 * 1000).toISOString(),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });

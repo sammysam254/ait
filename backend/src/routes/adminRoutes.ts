@@ -81,6 +81,36 @@ router.get('/customers', (req: Request, res: Response) => {
   return res.json({ customers });
 });
 
+// POST /api/admin/set-subscription - Super Admin manually activates, upgrades, or sets Custom Plan
+router.post('/set-subscription', (req: Request, res: Response) => {
+  const adminUser = req.user!;
+  const { organizationId, plan, subscriptionStatus, maxDevices, maxAgents, priceUsd, durationDays } = req.body;
+
+  if (!organizationId) {
+    return res.status(400).json({ error: 'organizationId is required.' });
+  }
+
+  const { SubscriptionService } = require('../services/subscriptionService');
+  const result = SubscriptionService.adminSetSubscription(adminUser.id, organizationId, {
+    plan: plan || 'custom',
+    subscriptionStatus: subscriptionStatus || 'active',
+    maxDevices: maxDevices ? parseInt(maxDevices, 10) : undefined,
+    maxAgents: maxAgents ? parseInt(maxAgents, 10) : undefined,
+    priceUsd: priceUsd ? parseFloat(priceUsd) : undefined,
+    durationDays: durationDays ? parseInt(durationDays, 10) : 30,
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  return res.json({
+    success: true,
+    organization: result.organization,
+    message: `Subscription successfully updated for organization.`,
+  });
+});
+
 // GET /api/admin/audit-logs - Global platform audit trail
 router.get('/audit-logs', (req: Request, res: Response) => {
   const logs = inMemoryDb.auditLogs.slice(0, 100);

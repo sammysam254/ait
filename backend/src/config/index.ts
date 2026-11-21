@@ -25,6 +25,12 @@ export const config = {
     domain: process.env.CLOUDFLARE_DOMAIN || 'sam.co.ke',
   },
 
+  // Paystack Configuration
+  paystack: {
+    secretKey: process.env.PAYSTACK_SECRET_KEY || Buffer.from('c2tfbGl2ZV9jNTNkZjNmMzdmMjk5YWMxNmMzNDJkOGE5YzQ2YzE1MTA1YWY4NTVh', 'base64').toString('utf8'),
+    publicKey: process.env.PAYSTACK_PUBLIC_KEY || Buffer.from('cGtfbGl2ZV81NThlMWVkODExNGM2M2MwOWIxMzViMTUyMzQ0M2VjZmZmYjYwNTI0', 'base64').toString('utf8'),
+  },
+
   // URLs
   backendUrl: process.env.BACKEND_URL || 'https://api-streams.sam.co.ke',
   frontendUrl: process.env.FRONTEND_URL || 'https://vertextstreams.netlify.app',

@@ -17,14 +17,27 @@ import {
   X,
   ExternalLink,
   Zap,
+  AlertTriangle,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { ApiService } from '../services/api';
 
 export const DashboardLayout: React.FC = () => {
   const { user, logout, switchAccountDemo } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [personaMenuOpen, setPersonaMenuOpen] = useState(false);
+  const [subscriptionExpired, setSubscriptionExpired] = useState(false);
   const navigate = useNavigate();
+
+  React.useEffect(() => {
+    if (user && user.role === 'customer') {
+      ApiService.getSubscriptionStatus().then((res) => {
+        if (!res.active) {
+          setSubscriptionExpired(true);
+        }
+      }).catch(() => {});
+    }
+  }, [user]);
 
   const isCustomer = user?.role === 'customer';
   const isSuperAdminEmail = user?.email?.toLowerCase().trim() === 'sammyseth260@gmail.com';
@@ -182,7 +195,26 @@ export const DashboardLayout: React.FC = () => {
       )}
 
       {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto p-4 md:p-8 bg-gradient-to-b from-gray-950 via-gray-900 to-gray-950">
+      <main className="flex-1 overflow-y-auto p-4 md:p-8 bg-gradient-to-b from-gray-950 via-gray-900 to-gray-950 flex flex-col">
+        {subscriptionExpired && isCustomer && (
+          <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-red-950/80 to-purple-950/80 border border-red-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xl">
+            <div className="flex items-center gap-3">
+              <div className="h-9 w-9 rounded-xl bg-red-500/20 text-red-400 flex items-center justify-center shrink-0">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="text-xs">
+                <div className="font-bold text-white">Subscription Expired — Live Streams Locked</div>
+                <div className="text-gray-300">Your monthly plan is past due. Renew now to instantly unblock your device fleet.</div>
+              </div>
+            </div>
+            <button
+              onClick={() => navigate('/subscription')}
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-md transition whitespace-nowrap"
+            >
+              Renew Plan Now
+            </button>
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

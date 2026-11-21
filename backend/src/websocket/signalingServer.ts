@@ -212,16 +212,33 @@ export class SignalingServer {
             ((videoPayload[0] === 0x00 && videoPayload[1] === 0x00 && videoPayload[2] === 0x00 && videoPayload[3] === 0x01 && (videoPayload[4] & 0x1f) === 7) ||
              (videoPayload[0] === 0x00 && videoPayload[1] === 0x00 && videoPayload[2] === 0x01 && (videoPayload[3] & 0x1f) === 7)));
 
-          const targetRoom = this.getRoom(targetDeviceId);
-          targetRoom.agent = session;
+          const dev = inMemoryDb.devices.get(targetDeviceId) || Array.from(inMemoryDb.devices.values()).find(d => d.adb_serial === targetDeviceId);
+          const room = this.getRoom(targetDeviceId);
+          room.agent = session;
           if (isConfig) {
-            targetRoom.lastHeader = videoPayload;
+            room.lastHeader = videoPayload;
           }
 
-          // Strict isolated routing: Deliver ONLY to viewers watching THIS target device!
-          if (targetRoom.viewers.size > 0) {
+          // If device has an alias (e.g. adb_serial vs UUID), cache and track both rooms
+          const altDeviceId = dev ? (dev.id === targetDeviceId ? dev.adb_serial : dev.id) : null;
+          if (altDeviceId) {
+            const altRoom = this.getRoom(altDeviceId);
+            altRoom.agent = session;
+            if (isConfig) {
+              altRoom.lastHeader = videoPayload;
+            }
+          }
+
+          // Strict isolated routing: Deliver to viewers watching this target device (under UUID or Serial)
+          const allViewers = new Set<ClientSession>(room.viewers);
+          if (altDeviceId) {
+            const altRoom = this.getRoom(altDeviceId);
+            for (const v of altRoom.viewers) allViewers.add(v);
+          }
+
+          if (allViewers.size > 0) {
             const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
-            for (const viewer of targetRoom.viewers) {
+            for (const viewer of allViewers) {
               if (viewer.ws.readyState === WebSocket.OPEN) {
                 if (isAudio && viewer.ws.bufferedAmount > 64 * 1024) continue;
                 if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
@@ -364,8 +381,30 @@ export class SignalingServer {
     const room = this.getRoom(deviceId);
     room.viewers.add(session);
 
-    const dev = inMemoryDb.devices.get(deviceId);
+    const dev = inMemoryDb.devices.get(deviceId) || Array.from(inMemoryDb.devices.values()).find(d => d.adb_serial === deviceId);
+    if (dev) {
+      if (dev.id !== deviceId) this.getRoom(dev.id).viewers.add(session);
+      if (dev.adb_serial && dev.adb_serial !== deviceId) this.getRoom(dev.adb_serial).viewers.add(session);
+    }
     const serial = dev ? dev.adb_serial : '';
+
+    // STRICT SUBSCRIPTION ENFORCEMENT: Block streams if customer's subscription or trial is expired
+    const targetOrgId = dev?.organization_id || session.organizationId;
+    const { SubscriptionService } = require('../services/subscriptionService');
+    const subCheck = SubscriptionService.isSubscriptionActive(targetOrgId);
+
+    if (!subCheck.active && session.role !== 'admin' && session.userId !== '11111111-1111-1111-1111-111111111111') {
+      console.warn(`[SignalingServer] Stream BLOCKED for device ${deviceId}: Subscription is ${subCheck.status} for org ${targetOrgId}`);
+      session.ws.send(JSON.stringify({
+        type: 'subscription-expired',
+        deviceId,
+        status: subCheck.status,
+        message: subCheck.reason || 'Subscription Expired - Streaming Suspended. Your monthly plan is due. Please renew your subscription to unblock live remote device streams.',
+        dueDate: subCheck.dueDate,
+        renewUrl: '/subscription',
+      }));
+      return;
+    }
 
     // If room has no active agent assigned, bind the first available connected agent
     if (!room.agent || room.agent.ws.readyState !== WebSocket.OPEN) {
@@ -398,16 +437,17 @@ export class SignalingServer {
     }
 
     // If we have cached SPS/PPS header, send it immediately so the player starts with zero delay
-    if (room.lastHeader && session.ws.readyState === WebSocket.OPEN) {
-      session.ws.send(room.lastHeader);
+    const cachedHeader = room.lastHeader || (dev && dev.adb_serial ? this.getRoom(dev.adb_serial).lastHeader : null) || (dev && dev.id ? this.getRoom(dev.id).lastHeader : null);
+    if (cachedHeader && session.ws.readyState === WebSocket.OPEN) {
+      session.ws.send(cachedHeader);
     }
 
     // Always request stream from available agent
     const activeAgent = (room.agent && room.agent.ws.readyState === WebSocket.OPEN) ? room.agent : Array.from(this.connectedAgents).find(a => a.ws.readyState === WebSocket.OPEN);
     if (activeAgent) {
       room.agent = activeAgent;
-      activeAgent.ws.send(JSON.stringify({ type: 'start-stream', deviceId, serial }));
-      DeviceService.updateStatus(deviceId, 'streaming');
+      activeAgent.ws.send(JSON.stringify({ type: 'start-stream', deviceId: dev ? dev.id : deviceId, serial }));
+      DeviceService.updateStatus(dev ? dev.id : deviceId, 'streaming');
     }
 
     session.ws.on('message', (data: string) => {

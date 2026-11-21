@@ -205,6 +205,16 @@ export class SharingService {
       };
     }
 
+    // Check organization subscription status
+    const { SubscriptionService } = require('./subscriptionService');
+    const subCheck = SubscriptionService.isSubscriptionActive(share.organization_id);
+    if (!subCheck.active) {
+      return {
+        valid: false,
+        error: 'DEVICE ACCESS SUSPENDED\n\nThe device owner\'s subscription has expired and live streaming is currently paused.\nPlease notify the device owner to renew their subscription plan.',
+      };
+    }
+
     const device = inMemoryDb.devices.get(share.device_id);
 
     return {
@@ -230,6 +240,16 @@ export class SharingService {
       return {
         success: false,
         error: 'ACCESS UNAVAILABLE: This device access link is invalid or has been revoked.'
+      };
+    }
+
+    // Check organization subscription status
+    const { SubscriptionService } = require('./subscriptionService');
+    const subCheck = SubscriptionService.isSubscriptionActive(share.organization_id);
+    if (!subCheck.active) {
+      return {
+        success: false,
+        error: 'DEVICE ACCESS SUSPENDED: The device owner\'s subscription has expired. Streaming is locked until renewed.',
       };
     }
 

@@ -28,6 +28,18 @@ router.get('/:id', authenticate, (req: Request, res: Response) => {
   const activeDevice = result.device!;
   const realDeviceId = activeDevice.id;
 
+  // Strict Subscription Gate: Verify active subscription or active trial for the device's organization
+  const { SubscriptionService } = require('../services/subscriptionService');
+  const subStatus = SubscriptionService.isSubscriptionActive(activeDevice.organization_id || user.organizationId);
+  if (!subStatus.active && user.system_role !== 'admin') {
+    return res.status(402).json({
+      error: subStatus.reason || 'Subscription Expired - Streaming Suspended. Your monthly plan is due. Please renew your subscription to unblock live remote device streams.',
+      subscriptionExpired: true,
+      status: 402,
+      dueDate: subStatus.dueDate,
+    });
+  }
+
   // Find agent info
   const agent = inMemoryDb.agents.get(activeDevice.agent_id);
 

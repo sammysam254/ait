@@ -451,6 +451,80 @@ export class ApiService {
     return this.request<{ url: string; pin: string }>(`/assignments/device-credentials/${deviceId}`);
   }
 
+  // Subscription & Paystack Payment
+  static async getSubscriptionStatus() {
+    return this.request<{
+      organizationId: string;
+      organizationName: string;
+      plan: 'starter' | 'enterprise' | 'custom';
+      planDetails: any;
+      status: 'active' | 'trial_active' | 'expired' | 'past_due' | 'terms_required';
+      active: boolean;
+      reason?: string;
+      dueDate?: string;
+      daysRemaining: number;
+      termsAccepted: boolean;
+      termsAcceptedAt?: string;
+      maxDevices: number;
+      maxAgents: number;
+      lastPaymentReference?: string;
+      lastPaymentAmount?: number;
+      customPriceUsd?: number;
+      contactPhone: string;
+      terms: Array<{ id: number; title: string; content: string }>;
+      plans: Record<string, any>;
+      paystackPublicKey: string;
+    }>('/subscription/status');
+  }
+
+  static async acceptSubscriptionTerms() {
+    return this.request<{ success: boolean; message: string; status: any }>('/subscription/accept-terms', {
+      method: 'POST',
+    });
+  }
+
+  static async startStarterTrial() {
+    return this.request<{ success: boolean; message: string; status: any }>('/subscription/start-trial', {
+      method: 'POST',
+    });
+  }
+
+  static async initializePaystack(plan: 'starter' | 'enterprise') {
+    return this.request<{
+      reference: string;
+      amountCents: number;
+      amountUsd: number;
+      publicKey: string;
+      email: string;
+      plan: string;
+    }>('/subscription/initialize-paystack', {
+      method: 'POST',
+      body: JSON.stringify({ plan }),
+    });
+  }
+
+  static async verifyPaystackPayment(reference: string, plan: 'starter' | 'enterprise') {
+    return this.request<{ success: boolean; message: string; status: any }>('/subscription/verify-paystack', {
+      method: 'POST',
+      body: JSON.stringify({ reference, plan }),
+    });
+  }
+
+  static async adminSetSubscription(data: {
+    organizationId: string;
+    plan: 'starter' | 'enterprise' | 'custom';
+    subscriptionStatus: 'active' | 'trial_active' | 'expired';
+    maxDevices?: number;
+    maxAgents?: number;
+    priceUsd?: number;
+    durationDays?: number;
+  }) {
+    return this.request<{ success: boolean; organization: any; message: string }>('/admin/set-subscription', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
   // Admin
   static async getAdminOverview() {
     try {

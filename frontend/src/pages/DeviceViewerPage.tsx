@@ -26,6 +26,10 @@ import {
   Home,
   ChevronLeft,
   ChevronRight,
+  Lock,
+  CreditCard,
+  AlertTriangle,
+  Phone,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { Device } from '../types';
@@ -51,7 +55,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
   const [device, setDevice] = useState<Device | null>(null);
   const [permissions, setPermissions] = useState<{ can_view: boolean; can_control: boolean } | null>(null);
   const [canControl, setCanControl] = useState(true);
-  const [status, setStatus] = useState<'connecting' | 'connected' | 'offline' | 'error'>('connecting');
+  const [status, setStatus] = useState<'connecting' | 'connected' | 'offline' | 'error' | 'subscription-expired'>('connecting');
   const [errorMessage, setErrorMessage] = useState('');
   const [fps, setFps] = useState(60);
   const [latency, setLatency] = useState(24);
@@ -395,6 +399,11 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
       }
       connectStream(data.streamWsUrl, data.streamToken);
     } catch (e: any) {
+      if (e.status === 402 || e.subscriptionExpired || (e.message && e.message.includes('Subscription'))) {
+        setStatus('subscription-expired');
+        setErrorMessage(e.error || e.message || 'Subscription Expired - Streaming Suspended. Your monthly plan is due. Please renew your subscription to unblock live remote device streams.');
+        return;
+      }
       if (retries > 0) {
         setTimeout(() => loadDevice(retries - 1), 1500);
       } else {
@@ -480,7 +489,11 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
       if (typeof event.data === 'string') {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'connection-established') {
+          if (msg.type === 'subscription-expired') {
+            setStatus('subscription-expired');
+            setErrorMessage(msg.message || 'Subscription Expired - Streaming Suspended. Your monthly plan is due. Please renew your subscription to unblock live remote device streams.');
+            return;
+          } else if (msg.type === 'connection-established') {
             setStatus('connected');
             if (msg.canControl !== undefined) setCanControl(msg.canControl);
             const reqId = activeDeviceIdRef.current || id;
@@ -1211,8 +1224,61 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
             className={`absolute inset-0 z-10 select-none outline-none ${canControl ? 'cursor-pointer' : 'cursor-default'}`}
           />
 
-          {/* Overlay when not connected */}
-          {status !== 'connected' && (
+          {/* Pretty Printed Subscription Expired Overlay */}
+          {status === 'subscription-expired' ? (
+            <div className="absolute inset-0 z-30 bg-gray-950/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center space-y-4 animate-in fade-in zoom-in-95 duration-200">
+              <div className="relative">
+                <div className="absolute -inset-1 rounded-full bg-red-500/30 blur-lg animate-pulse" />
+                <div className="relative h-16 w-16 rounded-2xl bg-red-950/80 border-2 border-red-500/50 flex items-center justify-center text-red-400 shadow-2xl">
+                  <Lock className="h-8 w-8" />
+                </div>
+              </div>
+
+              <div className="space-y-1 max-w-md">
+                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-red-500/20 text-red-400 border border-red-500/30 mb-1">
+                  Streaming Suspended
+                </span>
+                <h2 className="text-xl font-extrabold text-white tracking-tight">
+                  Subscription Plan Expired
+                </h2>
+                <p className="text-xs text-gray-300 leading-relaxed">
+                  {errorMessage || 'Your monthly subscription plan is past due. Live device streaming and interactive controls are locked until your subscription is renewed.'}
+                </p>
+              </div>
+
+              <div className="w-full max-w-sm p-3.5 rounded-xl bg-gray-900/90 border border-gray-800 text-left space-y-2 text-xs">
+                <div className="flex items-center justify-between text-gray-400">
+                  <span>Stream Status</span>
+                  <span className="font-semibold text-rose-400">Blocked by Server</span>
+                </div>
+                <div className="flex items-center justify-between text-gray-400">
+                  <span>Plan Options</span>
+                  <span className="font-semibold text-white">Starter ($80) / Enterprise ($100)</span>
+                </div>
+                <div className="flex items-center justify-between text-gray-400">
+                  <span>In-App Payment</span>
+                  <span className="font-semibold text-emerald-400">Instant Paystack Unlock</span>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2.5 w-full max-w-sm pt-1">
+                <button
+                  onClick={() => navigate('/subscription')}
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-xs shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2 transition transform active:scale-95"
+                >
+                  <CreditCard className="h-4 w-4" />
+                  <span>Renew Plan Now</span>
+                </button>
+                <a
+                  href="tel:+254706499848"
+                  className="py-2.5 px-3 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 font-semibold text-xs flex items-center justify-center gap-1.5 transition"
+                >
+                  <Phone className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Support</span>
+                </a>
+              </div>
+            </div>
+          ) : status !== 'connected' && (
             <div className="absolute inset-0 z-20 bg-gray-950/80 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center space-y-3">
               <Smartphone className="h-10 w-10 text-gray-500 animate-bounce" />
               <div className="text-sm font-semibold text-gray-200">
