@@ -21,7 +21,8 @@ export class SharingService {
   }
 
   /**
-   * Create or replace a device share link
+   * Create or replace a device share link.
+   * Immediately revokes all other existing share links for this device!
    */
   static async createShare(
     deviceId: string,
@@ -34,6 +35,41 @@ export class SharingService {
       customPin?: string;
     } = {}
   ): Promise<{ share: DeviceShare; plainPin: string }> {
+    // Resolve device canonical ID and serial
+    const dev = inMemoryDb.devices.get(deviceId) || Array.from(inMemoryDb.devices.values()).find(d => d.adb_serial === deviceId);
+    const resolvedDeviceId = dev ? dev.id : deviceId;
+    const serial = dev ? dev.adb_serial : '';
+
+    // 1. IMMEDIATELY REVOKE all existing active share links for this device
+    const revokedShareIds: string[] = [];
+    for (const [id, share] of inMemoryDb.deviceShares.entries()) {
+      const matchesDevice = share.device_id === resolvedDeviceId || share.device_id === deviceId || (serial && share.device_id === serial);
+      if (matchesDevice && !share.is_revoked) {
+        share.is_revoked = true;
+        share.updated_at = new Date().toISOString();
+        revokedShareIds.push(id);
+
+        inMemoryDb.auditLogs.unshift({
+          id: uuidv4(),
+          organization_id: organizationId,
+          user_id: userId,
+          action: 'DEVICE_SHARE_REVOKED',
+          resource_type: 'device_share',
+          resource_id: share.id,
+          details: { deviceId: share.device_id, reason: 'Automatically revoked by generation of a new share link' },
+          created_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    // 2. Immediately disconnect any live viewer WebSocket sessions using the old links
+    if (revokedShareIds.length > 0) {
+      try {
+        const { SignalingServer } = require('../websocket/signalingServer');
+        SignalingServer.disconnectRevokedShares(revokedShareIds, [resolvedDeviceId, deviceId, serial].filter(Boolean));
+      } catch (e) {}
+    }
+
     const plainPin = options.customPin && /^\d{4,8}$/.test(options.customPin) 
       ? options.customPin 
       : this.generateRandomPin();
@@ -45,7 +81,7 @@ export class SharingService {
     const newShare: DeviceShare = {
       id: uuidv4(),
       organization_id: organizationId,
-      device_id: deviceId,
+      device_id: resolvedDeviceId, // Always use canonical device ID
       share_token: shareToken,
       pin_hash: pinHash,
       pin_preview: plainPin, // stored for owner preview in UI
@@ -70,7 +106,7 @@ export class SharingService {
       action: 'DEVICE_SHARE_CREATED',
       resource_type: 'device_share',
       resource_id: newShare.id,
-      details: { deviceId, allowControl: newShare.allow_control, expiresAt },
+      details: { deviceId: resolvedDeviceId, allowControl: newShare.allow_control, expiresAt, revokedPreviousCount: revokedShareIds.length },
       created_at: new Date().toISOString(),
     });
 
@@ -86,11 +122,13 @@ export class SharingService {
     const resolvedId = dev ? dev.id : deviceId;
     const serial = dev ? dev.adb_serial : '';
 
-    return Array.from(inMemoryDb.deviceShares.values()).find(
+    const shares = Array.from(inMemoryDb.deviceShares.values()).filter(
       s => (s.device_id === resolvedId || (serial && s.device_id === serial)) &&
            (!organizationId || s.organization_id === organizationId || (dev && s.organization_id === dev.organization_id)) &&
            !s.is_revoked
-    );
+    ).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    return shares[0];
   }
 
   /**
@@ -136,6 +174,12 @@ export class SharingService {
     share.locked_until = undefined;
     share.updated_at = new Date().toISOString();
 
+    // Disconnect active viewers using the old token URL
+    try {
+      const { SignalingServer } = require('../websocket/signalingServer');
+      SignalingServer.disconnectRevokedShares([shareId], [share.device_id]);
+    } catch (e) {}
+
     // Audit log
     inMemoryDb.auditLogs.unshift({
       id: uuidv4(),
@@ -161,6 +205,12 @@ export class SharingService {
 
     share.is_revoked = true;
     share.updated_at = new Date().toISOString();
+
+    // Disconnect active viewers immediately
+    try {
+      const { SignalingServer } = require('../websocket/signalingServer');
+      SignalingServer.disconnectRevokedShares([shareId], [share.device_id]);
+    } catch (e) {}
 
     // Audit log
     inMemoryDb.auditLogs.unshift({

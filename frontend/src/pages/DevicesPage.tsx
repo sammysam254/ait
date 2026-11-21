@@ -350,6 +350,10 @@ export const DevicesPage: React.FC = () => {
                   />
                 </div>
 
+                <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-300 text-[11px] leading-relaxed">
+                  ⚠️ Note: Generating a new share link will immediately revoke all previous share links for this device and disconnect any current viewers.
+                </div>
+
                 <button
                   onClick={handleCreateShare}
                   disabled={shareLoading}
@@ -360,8 +364,8 @@ export const DevicesPage: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-4 text-xs">
-                <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs">
-                  Access link generated! Share both the URL and PIN with the recipient.
+                <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs leading-relaxed">
+                  Access link generated! All previous share links for this device have been revoked. Share both the URL and PIN with the recipient.
                 </div>
 
                 <div className="space-y-2">

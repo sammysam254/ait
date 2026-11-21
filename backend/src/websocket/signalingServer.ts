@@ -17,16 +17,19 @@ interface ClientSession {
   organizationId: string;
   deviceId?: string;
   deviceIds?: Set<string>;
+  shareId?: string;
   canControl: boolean;
   canView: boolean;
 }
 
 export class SignalingServer {
+  public static instance: SignalingServer | null = null;
   private wss: WebSocketServer;
   private deviceRooms: Map<string, { agent?: ClientSession; viewers: Set<ClientSession>; lastHeader?: Buffer }> = new Map();
   private connectedAgents: Set<ClientSession> = new Set();
 
   constructor(server: HttpServer) {
+    SignalingServer.instance = this;
     this.wss = new WebSocketServer({
       server,
       path: '/ws',
@@ -35,6 +38,34 @@ export class SignalingServer {
       clientTracking: true,
     });
     this.initialize();
+  }
+
+  /**
+   * Immediately disconnects all active viewers connected using revoked share IDs
+   */
+  public static disconnectRevokedShares(revokedShareIds: string[], deviceIdentifiers: string[]) {
+    if (!SignalingServer.instance || !revokedShareIds.length) return;
+    const targetShareIds = new Set(revokedShareIds);
+    for (const devId of deviceIdentifiers) {
+      if (!devId) continue;
+      const room = SignalingServer.instance.deviceRooms.get(devId);
+      if (room) {
+        for (const viewer of Array.from(room.viewers)) {
+          if (viewer.role === 'share_viewer' && viewer.shareId && targetShareIds.has(viewer.shareId)) {
+            try {
+              if (viewer.ws.readyState === WebSocket.OPEN) {
+                viewer.ws.send(JSON.stringify({
+                  type: 'share-revoked',
+                  message: 'ACCESS REVOKED: A new share link was generated for this device. This access session has been terminated.',
+                }));
+                viewer.ws.close(4003, 'Share link revoked');
+              }
+            } catch (e) {}
+            room.viewers.delete(viewer);
+          }
+        }
+      }
+    }
   }
 
   private initialize() {
@@ -78,13 +109,24 @@ export class SignalingServer {
           };
           this.handleAgentConnection(session);
         } else if (decoded.type === 'share_session') {
-          // Public device share viewer
+          // Public device share viewer - verify that the share is still active and not revoked
+          const share = inMemoryDb.deviceShares.get(decoded.shareId);
+          if (!share || share.is_revoked || new Date(share.expires_at).getTime() < Date.now()) {
+            ws.send(JSON.stringify({
+              type: 'share-revoked',
+              message: 'This device share link has been revoked or expired. Please request a new link from the device owner.',
+            }));
+            ws.close(4003, 'Share link revoked');
+            return;
+          }
+
           session = {
             ws,
             type: 'viewer',
             role: 'share_viewer',
             organizationId: decoded.organizationId,
             deviceId: decoded.deviceId,
+            shareId: decoded.shareId,
             canControl: !!decoded.allowControl,
             canView: true,
           };

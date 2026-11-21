@@ -623,6 +623,13 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
             setStatus('subscription-expired');
             setErrorMessage(msg.message || 'Subscription Expired - Streaming Suspended. Your monthly plan is due. Please renew your subscription to unblock live remote device streams.');
             return;
+          } else if (msg.type === 'share-revoked') {
+            setStatus('error');
+            setErrorMessage(msg.message || 'ACCESS UNAVAILABLE\n\nThis device access link has been revoked.\nThe device owner generated a new sharing link.\nPlease request the updated link from the device owner.');
+            if (wsRef.current) {
+              try { wsRef.current.close(4003, 'Share revoked'); } catch (e) {}
+            }
+            return;
           } else if (msg.type === 'connection-established') {
             setStatus('connected');
             if (msg.canControl !== undefined) setCanControl(msg.canControl);
@@ -799,6 +806,11 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
       if (pingTimer) clearInterval(pingTimer);
       console.warn(`[Viewer] WebSocket disconnected (code: ${event.code}). Auto-reconnecting in 1.5s...`);
       if (event.code === 4003 || event.code === 4002) {
+        if (isPublicShare) {
+          setStatus('error');
+          setErrorMessage('ACCESS UNAVAILABLE\n\nThis device access link has been revoked or expired.\nThe device owner generated a new sharing link.\nPlease request the updated link from the device owner.');
+          return;
+        }
         // Forbidden or Stale ID: re-sync device metadata from API instead of looping on invalid token
         if (!isPublicShare && isMountedRef.current && !reconnectTimerRef.current) {
           reconnectTimerRef.current = setTimeout(() => {
