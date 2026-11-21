@@ -527,7 +527,21 @@ async function injectInput(serial, action, data) {
           const nextRot = (curRot === 1) ? 0 : 1;
           deviceRotations.set(serial, nextRot);
 
-          // 1. Lock Android system rotation cleanly (no conflicting scrcpy command)
+          // Swap stored dimensions and notify cloud viewer immediately
+          const dims = deviceDimensions.get(serial);
+          if (dims) {
+            const newW = (nextRot === 1) ? Math.max(dims.width, dims.height) : Math.min(dims.width, dims.height);
+            const newH = (nextRot === 1) ? Math.min(dims.width, dims.height) : Math.max(dims.width, dims.height);
+            deviceDimensions.set(serial, { width: newW, height: newH });
+            if (ws && ws.readyState === 1) {
+              const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+              try {
+                ws.send(JSON.stringify({ type: 'device-dimensions', deviceId: targetDevId, serial, width: newW, height: newH }));
+              } catch (e) {}
+            }
+          }
+
+          // 1. Lock Android system rotation cleanly
           sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
 
           // 2. Request fresh IDR keyframe at 80ms and 220ms so browser switches instantly with zero lag

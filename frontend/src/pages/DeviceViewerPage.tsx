@@ -503,7 +503,12 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
             }
           } else if (msg.type === 'device-dimensions') {
             if (msg.width && msg.height) {
-              setStreamDimensions({ width: msg.width, height: msg.height });
+              setStreamDimensions((prev) => {
+                if (prev && (prev.width !== msg.width || prev.height !== msg.height)) {
+                  setTimeout(() => refreshStream(), 50);
+                }
+                return { width: msg.width, height: msg.height };
+              });
             }
           } else if (msg.type === 'device-offline') {
             console.warn('[Viewer] Device stream offline signaled. Retrying in background...');
@@ -1416,11 +1421,8 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
             onClick={() => {
               sendInput('rotate');
               setTimeout(() => {
-                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                  const currentDeviceId = activeDeviceIdRef.current || id;
-                  wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: currentDeviceId }));
-                }
-              }, 120);
+                refreshStream();
+              }, 220);
             }}
             disabled={!canControl}
             className="p-2 md:p-2.5 rounded-xl hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition active:scale-90 active:bg-indigo-500/30"
