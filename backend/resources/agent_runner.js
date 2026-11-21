@@ -387,9 +387,37 @@ async function injectInput(serial, action, data) {
             return true;
           }
 
-          // 2. Physical release: dispatch ACTION_UP directly at real coordinates
-          // Android native VelocityTracker accurately uses the streamed ACTION_MOVE history.
-          // Eliminates artificial full-screen flings; swipes respond strictly to finger/mouse movement!
+          // 2. Physical release with hand-like inertial glide:
+          // If the finger was actively moving at release (|speed| > 0.25 px/ms),
+          // inject 2 micro-steps (8ms apart) matching the exact hand release velocity.
+          // This feeds Android's native VelocityTracker with accurate real-time delta,
+          // giving instant, silky-smooth native Android scrolling physics with ZERO lag!
+          const rawVx = (data && typeof data.vx === 'number') ? data.vx : 0;
+          const rawVy = (data && typeof data.vy === 'number') ? data.vy : 0;
+          const scaleFactorX = targetW / srcW;
+          const scaleFactorY = targetH / srcH;
+          const vx = rawVx * scaleFactorX;
+          const vy = rawVy * scaleFactorY;
+          const speed = Math.hypot(vx, vy);
+
+          if (speed > 0.25) {
+            const step1X = Math.round(x + vx * 8);
+            const step1Y = Math.round(y + vy * 8);
+            const step2X = Math.round(x + vx * 16);
+            const step2Y = Math.round(y + vy * 16);
+
+            sendScrcpyTouch(sock, 2, step1X, step1Y, targetW, targetH);
+            setTimeout(() => {
+              const s = controlSockets.get(serial);
+              if (s && !s.destroyed) {
+                sendScrcpyTouch(s, 2, step2X, step2Y, targetW, targetH);
+                sendScrcpyTouch(s, 1, step2X, step2Y, targetW, targetH);
+              }
+            }, 8);
+            return true;
+          }
+
+          // 3. User stopped or moved very slowly: immediate native release with no fling
           sendScrcpyTouch(sock, 1, x, y, targetW, targetH);
           return true;
         }

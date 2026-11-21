@@ -496,35 +496,11 @@ export class SignalingServer {
               return;
             }
 
-            // SECURITY: Mask all control activities to prevent detection
+            // Direct zero-latency pass-through for interactive streaming touch controls
             const targetDevId = msg.deviceId || deviceId;
-            SecurityService.maskControlActivity(targetDevId, msg.action, session.userId);
-            SecurityService.enableStealthMode(targetDevId);
-
-            // ANTI-DETECTION: Enhanced touch realism (INSTANT - pure math, no delays)
             let humanizedData = msg.data;
-            
-            if (msg.action === 'touch' && msg.data?.x !== undefined && msg.data?.y !== undefined) {
-              // Apply comprehensive touch realism (< 0.01ms overhead)
-              const enhanced = DeviceAntiDetectionService.enhanceTouchRealism(msg.data);
-              humanizedData = enhanced;
-              
-              // 2% chance of accidental touch (mimics human error)
-              if (DeviceAntiDetectionService.shouldSimulateAccidentalTouch()) {
-                const accidental = DeviceAntiDetectionService.getAccidentalTouch(msg.data);
-                // Send accidental touch IMMEDIATELY (no setTimeout)
-                if (agentSession && agentSession.ws.readyState === WebSocket.OPEN) {
-                  agentSession.ws.send(JSON.stringify({
-                    type: 'control-input',
-                    deviceId: targetDevId,
-                    serial: serial || (dev ? dev.adb_serial : ''),
-                    action: msg.action,
-                    data: { x: accidental.x, y: accidental.y },
-                  }));
-                }
-              }
-            } else if (msg.action === 'swipe' && msg.data?.x1 !== undefined) {
-              // Apply natural swipe path with wobble (< 1ms computation)
+
+            if (msg.action === 'swipe' && msg.data?.x1 !== undefined) {
               const path = DeviceAntiDetectionService.generateNaturalSwipePath(
                 msg.data.x1,
                 msg.data.y1,
@@ -533,19 +509,11 @@ export class SignalingServer {
               );
               humanizedData = { ...msg.data, path };
             } else if (msg.action === 'text' && msg.data?.text) {
-              // Apply realistic typing pattern with typos (instant computation)
               const pattern = DeviceAntiDetectionService.generateRealisticTypingPattern(msg.data.text);
               humanizedData = { ...msg.data, pattern };
-            } else {
-              // Basic humanization for other inputs (< 0.01ms)
-              const coords = DeviceStealthService.humanizeTouchCoordinates(
-                msg.data?.x || 0,
-                msg.data?.y || 0
-              );
-              humanizedData = { ...msg.data, ...coords };
             }
 
-            // Forward IMMEDIATELY - zero delay added
+            // Forward IMMEDIATELY with zero latency
             if (agentSession) {
               room.agent = agentSession;
               agentSession.ws.send(JSON.stringify({
@@ -555,14 +523,6 @@ export class SignalingServer {
                 action: msg.action,
                 data: humanizedData,
               }));
-
-              // Generate cover log (async, non-blocking)
-              if (dev) {
-                SecurityService.generateCoverLog(
-                  dev.organization_id || session.organizationId,
-                  targetDevId
-                );
-              }
             }
             break;
           }
