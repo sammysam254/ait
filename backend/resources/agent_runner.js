@@ -187,6 +187,135 @@ const lastShellTouch = new Map(); // serial -> { x, y, time }
 const deviceRotations = new Map(); // serial -> number (0=portrait, 1=landscape 90, 2=portrait 180, 3=landscape 270)
 const deviceDimensions = new Map(); // serial -> { width, height }
 
+// High-precision H.264 SPS parser to auto-detect live video encoder dimensions
+function parseH264SPS(bytes) {
+  if (!bytes || bytes.length < 5) return null;
+  let spsData = null;
+  for (let i = 0; i < bytes.length - 4; i++) {
+    let start = -1;
+    if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1) start = i + 3;
+    else if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 0 && bytes[i + 3] === 1) start = i + 4;
+
+    if (start !== -1 && start < bytes.length) {
+      if ((bytes[start] & 0x1f) === 7) {
+        let end = bytes.length;
+        for (let j = start + 1; j < bytes.length - 3; j++) {
+          if (bytes[j] === 0 && bytes[j + 1] === 0 && (bytes[j + 2] === 1 || (bytes[j + 2] === 0 && bytes[j + 3] === 1))) {
+            end = j;
+            break;
+          }
+        }
+        spsData = bytes.subarray(start, end);
+        break;
+      }
+    }
+  }
+
+  if (!spsData || spsData.length < 4) return null;
+
+  try {
+    const rbsp = [];
+    for (let i = 0; i < spsData.length; i++) {
+      if (i + 2 < spsData.length && spsData[i] === 0 && spsData[i + 1] === 0 && spsData[i + 2] === 3) {
+        rbsp.push(0);
+        rbsp.push(0);
+        i += 2;
+      } else {
+        rbsp.push(spsData[i]);
+      }
+    }
+    const data = Buffer.isBuffer(bytes) ? Buffer.from(rbsp) : new Uint8Array(rbsp);
+    let bitPos = 8; // skip 1-byte NAL header
+
+    function readBits(num) {
+      let val = 0;
+      for (let i = 0; i < num; i++) {
+        const byteIdx = bitPos >> 3;
+        if (byteIdx >= data.length) return 0;
+        const bitIdx = 7 - (bitPos & 7);
+        val = (val << 1) | ((data[byteIdx] >> bitIdx) & 1);
+        bitPos++;
+      }
+      return val;
+    }
+
+    function readUEG() {
+      let zeros = 0;
+      while (readBits(1) === 0 && zeros < 32) zeros++;
+      return zeros === 0 ? 0 : ((1 << zeros) - 1) + readBits(zeros);
+    }
+
+    function skipEG() {
+      readUEG();
+    }
+
+    const profileIdc = readBits(8);
+    readBits(5);
+    readBits(3);
+    readBits(8);
+    readUEG();
+
+    if ([100, 110, 122, 244, 44, 83, 86, 118, 128].includes(profileIdc)) {
+      const chroma = readUEG();
+      if (chroma === 3) readBits(1);
+      readUEG();
+      readUEG();
+      readBits(1);
+      if (readBits(1)) {
+        const count = chroma !== 3 ? 8 : 12;
+        for (let i = 0; i < count; i++) {
+          if (readBits(1)) {
+            const size = i < 6 ? 16 : 64;
+            let last = 8, next = 8;
+            for (let j = 0; j < size; j++) {
+              if (next !== 0) {
+                const delta = readUEG();
+                next = (last + delta) & 0xff;
+              }
+              last = next === 0 ? last : next;
+            }
+          }
+        }
+      }
+    }
+
+    readUEG();
+    const picOrderType = readUEG();
+    if (picOrderType === 0) {
+      readUEG();
+    } else if (picOrderType === 1) {
+      readBits(1);
+      skipEG();
+      skipEG();
+      const numRef = readUEG();
+      for (let i = 0; i < numRef; i++) skipEG();
+    }
+
+    readUEG();
+    readBits(1);
+    const picWidthMbs = readUEG();
+    const picHeightUnits = readUEG();
+    const frameMbsOnly = readBits(1);
+    if (!frameMbsOnly) readBits(1);
+    readBits(1);
+
+    let cropLeft = 0, cropRight = 0, cropTop = 0, cropBottom = 0;
+    if (readBits(1)) {
+      cropLeft = readUEG();
+      cropRight = readUEG();
+      cropTop = readUEG();
+      cropBottom = readUEG();
+    }
+
+    const width = ((picWidthMbs + 1) * 16) - (cropLeft + cropRight) * 2;
+    const height = ((2 - frameMbsOnly) * (picHeightUnits + 1) * 16) - ((frameMbsOnly ? 2 : 4) * (cropTop + cropBottom));
+    if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
+      return { width, height };
+    }
+  } catch (e) {}
+  return null;
+}
+
 function getDeviceShell(serial) {
   let proc = shellSessions.get(serial);
   if (!proc || proc.killed) {
@@ -343,23 +472,11 @@ async function injectInput(serial, action, data) {
     const sock = controlSockets.get(serial);
     const clientW = data.width || 720;
     const clientH = data.height || 1600;
-    const isLandscape = clientW > clientH;
 
-    // Retrieve native device physical dimensions
+    // Use current live stream dimensions if available, otherwise client dimensions
     let dims = deviceDimensions.get(serial);
-    let devW = dims ? dims.width : clientW;
-    let devH = dims ? dims.height : clientH;
-
-    // Dynamically align target dimensions with the active orientation!
-    // In landscape: width is the larger dimension, height is the smaller dimension.
-    // In portrait: width is the smaller dimension, height is the larger dimension.
-    const maxDim = Math.max(devW, devH);
-    const minDim = Math.min(devW, devH);
-    const targetW = isLandscape ? maxDim : minDim;
-    const targetH = isLandscape ? minDim : maxDim;
-
-    // Keep stored dimensions synchronized with current orientation
-    deviceDimensions.set(serial, { width: targetW, height: targetH });
+    const targetW = dims ? dims.width : clientW;
+    const targetH = dims ? dims.height : clientH;
 
     const scaleX = (val) => Math.round(((val || 0) / clientW) * targetW);
     const scaleY = (val) => Math.round(((val || 0) / clientH) * targetH);
@@ -527,36 +644,33 @@ async function injectInput(serial, action, data) {
           const nextRot = (curRot === 1) ? 0 : 1;
           deviceRotations.set(serial, nextRot);
 
-          // Swap stored dimensions and notify cloud viewer immediately
-          const dims = deviceDimensions.get(serial);
-          if (dims) {
-            const newW = (nextRot === 1) ? Math.max(dims.width, dims.height) : Math.min(dims.width, dims.height);
-            const newH = (nextRot === 1) ? Math.min(dims.width, dims.height) : Math.max(dims.width, dims.height);
-            deviceDimensions.set(serial, { width: newW, height: newH });
-            if (ws && ws.readyState === 1) {
-              const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
-              try {
-                ws.send(JSON.stringify({ type: 'device-dimensions', deviceId: targetDevId, serial, width: newW, height: newH }));
-              } catch (e) {}
-            }
-          }
+          // 1. Force Android system orientation lock cleanly via wm user-rotation and settings
+          sendShellInput(serial, `wm user-rotation lock ${nextRot}; settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
 
-          // 1. Lock Android system rotation cleanly
-          sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
+          // 2. Also send native scrcpy SC_CONTROL_MSG_TYPE_ROTATE_DEVICE (type 11)
+          try {
+            sock.write(Buffer.from([11]));
+          } catch (e) {}
 
-          // 2. Request fresh IDR keyframe at 80ms and 220ms so browser switches instantly with zero lag
+          // 3. Request fresh IDR keyframe at 100ms, 250ms, and 450ms so video encoder outputs the new SPS/IDR immediately
           setTimeout(() => {
             const s = controlSockets.get(serial);
             if (s && !s.destroyed) {
               try { s.write(Buffer.from([17])); } catch (e) {}
             }
-          }, 80);
+          }, 100);
           setTimeout(() => {
             const s = controlSockets.get(serial);
             if (s && !s.destroyed) {
               try { s.write(Buffer.from([17])); } catch (e) {}
             }
-          }, 220);
+          }, 250);
+          setTimeout(() => {
+            const s = controlSockets.get(serial);
+            if (s && !s.destroyed) {
+              try { s.write(Buffer.from([17])); } catch (e) {}
+            }
+          }, 450);
           return true;
         }
       }
@@ -628,7 +742,7 @@ async function injectInput(serial, action, data) {
         const curRot = deviceRotations.get(serial) || 0;
         const nextRot = (curRot === 1) ? 0 : 1;
         deviceRotations.set(serial, nextRot);
-        sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
+        sendShellInput(serial, `wm user-rotation lock ${nextRot}; settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
         return true;
       }
       case 'text':
@@ -998,6 +1112,21 @@ function startStream(deviceId, targetSerial) {
 
           if (isConfig) {
             cachedConfig = packetData;
+            const spsDims = parseH264SPS(packetData);
+            if (spsDims && spsDims.width > 0 && spsDims.height > 0) {
+              const prev = deviceDimensions.get(serial);
+              if (!prev || prev.width !== spsDims.width || prev.height !== spsDims.height) {
+                console.log(`[StreamBridge] 🔄 Resolution auto-detected: ${spsDims.width}x${spsDims.height} for ${serial}`);
+                deviceDimensions.set(serial, spsDims);
+                if (deviceId) deviceDimensions.set(deviceId, spsDims);
+                if (ws && ws.readyState === 1) {
+                  const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
+                  try {
+                    ws.send(JSON.stringify({ type: 'device-dimensions', deviceId: targetDevId, serial, width: spsDims.width, height: spsDims.height }));
+                  } catch (e) {}
+                }
+              }
+            }
           } else if (isKeyframe) {
             const fullKeyframe = cachedConfig ? Buffer.concat([cachedConfig, packetData]) : packetData;
             cachedKeyframes.set(serial, fullKeyframe);

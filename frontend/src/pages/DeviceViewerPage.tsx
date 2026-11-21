@@ -41,6 +41,135 @@ export interface DeviceViewerPageProps {
   shareDeviceName?: string;
 }
 
+// High-precision H.264 SPS parser to auto-detect live video stream resolution
+function parseH264SPS(bytes: Uint8Array): { width: number; height: number } | null {
+  if (!bytes || bytes.length < 5) return null;
+  let spsData: Uint8Array | null = null;
+  for (let i = 0; i < bytes.length - 4; i++) {
+    let start = -1;
+    if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1) start = i + 3;
+    else if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 0 && bytes[i + 3] === 1) start = i + 4;
+
+    if (start !== -1 && start < bytes.length) {
+      if ((bytes[start] & 0x1f) === 7) {
+        let end = bytes.length;
+        for (let j = start + 1; j < bytes.length - 3; j++) {
+          if (bytes[j] === 0 && bytes[j + 1] === 0 && (bytes[j + 2] === 1 || (bytes[j + 2] === 0 && bytes[j + 3] === 1))) {
+            end = j;
+            break;
+          }
+        }
+        spsData = bytes.subarray(start, end);
+        break;
+      }
+    }
+  }
+
+  if (!spsData || spsData.length < 4) return null;
+
+  try {
+    const rbsp: number[] = [];
+    for (let i = 0; i < spsData.length; i++) {
+      if (i + 2 < spsData.length && spsData[i] === 0 && spsData[i + 1] === 0 && spsData[i + 2] === 3) {
+        rbsp.push(0);
+        rbsp.push(0);
+        i += 2;
+      } else {
+        rbsp.push(spsData[i]);
+      }
+    }
+    const data = new Uint8Array(rbsp);
+    let bitPos = 8; // skip 1-byte NAL header
+
+    function readBits(num: number): number {
+      let val = 0;
+      for (let i = 0; i < num; i++) {
+        const byteIdx = bitPos >> 3;
+        if (byteIdx >= data.length) return 0;
+        const bitIdx = 7 - (bitPos & 7);
+        val = (val << 1) | ((data[byteIdx] >> bitIdx) & 1);
+        bitPos++;
+      }
+      return val;
+    }
+
+    function readUEG(): number {
+      let zeros = 0;
+      while (readBits(1) === 0 && zeros < 32) zeros++;
+      return zeros === 0 ? 0 : ((1 << zeros) - 1) + readBits(zeros);
+    }
+
+    function skipEG() {
+      readUEG();
+    }
+
+    const profileIdc = readBits(8);
+    readBits(5);
+    readBits(3);
+    readBits(8);
+    readUEG();
+
+    if ([100, 110, 122, 244, 44, 83, 86, 118, 128].includes(profileIdc)) {
+      const chroma = readUEG();
+      if (chroma === 3) readBits(1);
+      readUEG();
+      readUEG();
+      readBits(1);
+      if (readBits(1)) {
+        const count = chroma !== 3 ? 8 : 12;
+        for (let i = 0; i < count; i++) {
+          if (readBits(1)) {
+            const size = i < 6 ? 16 : 64;
+            let last = 8, next = 8;
+            for (let j = 0; j < size; j++) {
+              if (next !== 0) {
+                const delta = readUEG();
+                next = (last + delta) & 0xff;
+              }
+              last = next === 0 ? last : next;
+            }
+          }
+        }
+      }
+    }
+
+    readUEG();
+    const picOrderType = readUEG();
+    if (picOrderType === 0) {
+      readUEG();
+    } else if (picOrderType === 1) {
+      readBits(1);
+      skipEG();
+      skipEG();
+      const numRef = readUEG();
+      for (let i = 0; i < numRef; i++) skipEG();
+    }
+
+    readUEG();
+    readBits(1);
+    const picWidthMbs = readUEG();
+    const picHeightUnits = readUEG();
+    const frameMbsOnly = readBits(1);
+    if (!frameMbsOnly) readBits(1);
+    readBits(1);
+
+    let cropLeft = 0, cropRight = 0, cropTop = 0, cropBottom = 0;
+    if (readBits(1)) {
+      cropLeft = readUEG();
+      cropRight = readUEG();
+      cropTop = readUEG();
+      cropBottom = readUEG();
+    }
+
+    const width = ((picWidthMbs + 1) * 16) - (cropLeft + cropRight) * 2;
+    const height = ((2 - frameMbsOnly) * (picHeightUnits + 1) * 16) - ((frameMbsOnly ? 2 : 4) * (cropTop + cropBottom));
+    if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
+      return { width, height };
+    }
+  } catch (e) {}
+  return null;
+}
+
 export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
   shareSessionToken,
   shareDeviceId,
@@ -63,6 +192,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
   const [quality, setQuality] = useState<'high' | 'medium' | 'low'>('high');
   const [isMuted, setIsMuted] = useState(false);
   const [streamDimensions, setStreamDimensions] = useState<{ width: number; height: number } | null>(null);
+  const activeStreamDimsRef = useRef<{ width: number; height: number } | null>(null);
   const [showKeyboardInput, setShowKeyboardInput] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [showSideControls, setShowSideControls] = useState(false);
@@ -503,12 +633,12 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
             }
           } else if (msg.type === 'device-dimensions') {
             if (msg.width && msg.height) {
-              setStreamDimensions((prev) => {
-                if (prev && (prev.width !== msg.width || prev.height !== msg.height)) {
-                  setTimeout(() => refreshStream(), 50);
-                }
-                return { width: msg.width, height: msg.height };
-              });
+              const cur = activeStreamDimsRef.current;
+              if (!cur || cur.width !== msg.width || cur.height !== msg.height) {
+                activeStreamDimsRef.current = { width: msg.width, height: msg.height };
+                setStreamDimensions({ width: msg.width, height: msg.height });
+                refreshStream();
+              }
             }
           } else if (msg.type === 'device-offline') {
             console.warn('[Viewer] Device stream offline signaled. Retrying in background...');
@@ -576,6 +706,40 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
         if (videoRef.current) {
           videoRef.current.className = 'w-full h-full object-contain pointer-events-none select-none';
           if (canvasRef.current) canvasRef.current.className = 'hidden';
+        }
+
+        // Auto-detect dynamic H.264 SPS resolution changes (e.g. rotation between portrait and landscape)
+        const spsDims = parseH264SPS(bytes);
+        if (spsDims && spsDims.width > 0 && spsDims.height > 0) {
+          const cur = activeStreamDimsRef.current;
+          if (!cur || cur.width !== spsDims.width || cur.height !== spsDims.height) {
+            activeStreamDimsRef.current = spsDims;
+            setStreamDimensions(spsDims);
+
+            // Re-create JMuxer cleanly so it parses the new SPS and allocates a matching SourceBuffer
+            if (jmuxerRef.current) {
+              try { jmuxerRef.current.destroy(); } catch (e) {}
+              jmuxerRef.current = null;
+            }
+            if (videoRef.current) {
+              videoRef.current.pause();
+              videoRef.current.removeAttribute('src');
+              videoRef.current.load();
+              try {
+                jmuxerRef.current = new JMuxer({
+                  node: videoRef.current,
+                  mode: 'video',
+                  flushingTime: 0,
+                  fps: 60,
+                  clearBuffer: true,
+                  debug: false,
+                });
+                if (typeof jmuxerRef.current.stopInterval === 'function') {
+                  jmuxerRef.current.stopInterval();
+                }
+              } catch (err) {}
+            }
+          }
         }
 
         if (jmuxerRef.current) {
@@ -663,8 +827,8 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
     if (!el) return null;
 
     const rect = cachedRectRef.current || el.getBoundingClientRect();
-    const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
-    const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
+    const deviceWidth = streamDimensions?.width || videoRef.current?.videoWidth || device?.screen_width || 720;
+    const deviceHeight = streamDimensions?.height || videoRef.current?.videoHeight || device?.screen_height || 1600;
 
     let clientWidth = rect.width;
     let clientHeight = rect.height;
@@ -697,8 +861,8 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
 
   const sendInput = (action: string, data: any = {}) => {
     if (!canControl || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
-    const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
+    const deviceWidth = streamDimensions?.width || videoRef.current?.videoWidth || device?.screen_width || 720;
+    const deviceHeight = streamDimensions?.height || videoRef.current?.videoHeight || device?.screen_height || 1600;
     wsRef.current.send(JSON.stringify({
       type: 'control-input',
       deviceId: activeDeviceIdRef.current || id || shareDeviceId,
@@ -712,10 +876,14 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
   };
 
   const refreshStream = () => {
+    if (jmuxerRef.current) {
+      try { jmuxerRef.current.destroy(); } catch (e) {}
+      jmuxerRef.current = null;
+    }
     if (videoRef.current) {
-      if (jmuxerRef.current) {
-        try { jmuxerRef.current.destroy(); } catch (e) {}
-      }
+      videoRef.current.pause();
+      videoRef.current.removeAttribute('src');
+      videoRef.current.load();
       try {
         jmuxerRef.current = new JMuxer({
           node: videoRef.current,
@@ -768,8 +936,8 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
       if (now - lastWheelTimeRef.current < 60) return;
       lastWheelTimeRef.current = now;
 
-      const deviceWidth = videoRef.current?.videoWidth || streamDimensions?.width || device?.screen_width || 720;
-      const deviceHeight = videoRef.current?.videoHeight || streamDimensions?.height || device?.screen_height || 1600;
+      const deviceWidth = streamDimensions?.width || videoRef.current?.videoWidth || device?.screen_width || 720;
+      const deviceHeight = streamDimensions?.height || videoRef.current?.videoHeight || device?.screen_height || 1600;
       const coords = getDeviceCoords(e.clientX, e.clientY) || {
         x: Math.round(deviceWidth / 2),
         y: Math.round(deviceHeight / 2),
@@ -1200,10 +1368,10 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
         {/* Device Container: Maximizes space on mobile, elegant frame on desktop */}
         <div
           style={{
-            aspectRatio: (videoRef.current?.videoWidth && videoRef.current?.videoHeight)
-              ? `${videoRef.current.videoWidth} / ${videoRef.current.videoHeight}`
-              : (streamDimensions?.width && streamDimensions?.height)
+            aspectRatio: (streamDimensions?.width && streamDimensions?.height)
               ? `${streamDimensions.width} / ${streamDimensions.height}`
+              : (videoRef.current?.videoWidth && videoRef.current?.videoHeight)
+              ? `${videoRef.current.videoWidth} / ${videoRef.current.videoHeight}`
               : (device?.screen_width && device?.screen_height)
               ? `${device.screen_width} / ${device.screen_height}`
               : '9 / 19.5',
@@ -1420,9 +1588,6 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
           <button
             onClick={() => {
               sendInput('rotate');
-              setTimeout(() => {
-                refreshStream();
-              }, 220);
             }}
             disabled={!canControl}
             className="p-2 md:p-2.5 rounded-xl hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition active:scale-90 active:bg-indigo-500/30"
