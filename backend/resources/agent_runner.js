@@ -341,17 +341,31 @@ async function injectInput(serial, action, data) {
   try {
     if (!data) data = {};
     const sock = controlSockets.get(serial);
-    const dims = deviceDimensions.get(serial);
-    const targetW = dims ? dims.width : (data.width || 720);
-    const targetH = dims ? dims.height : (data.height || 1600);
-    const srcW = data.width || 720;
-    const srcH = data.height || 1600;
+    const clientW = data.width || 720;
+    const clientH = data.height || 1600;
+    const isLandscape = clientW > clientH;
 
-    const scaleX = (x) => Math.round(((x || 0) / srcW) * targetW);
-    const scaleY = (y) => Math.round(((y || 0) / srcH) * targetH);
+    // Retrieve native device physical dimensions
+    let dims = deviceDimensions.get(serial);
+    let devW = dims ? dims.width : clientW;
+    let devH = dims ? dims.height : clientH;
 
-    const x = scaleX(data.x);
-    const y = scaleY(data.y);
+    // Dynamically align target dimensions with the active orientation!
+    // In landscape: width is the larger dimension, height is the smaller dimension.
+    // In portrait: width is the smaller dimension, height is the larger dimension.
+    const maxDim = Math.max(devW, devH);
+    const minDim = Math.min(devW, devH);
+    const targetW = isLandscape ? maxDim : minDim;
+    const targetH = isLandscape ? minDim : maxDim;
+
+    // Keep stored dimensions synchronized with current orientation
+    deviceDimensions.set(serial, { width: targetW, height: targetH });
+
+    const scaleX = (val) => Math.round(((val || 0) / clientW) * targetW);
+    const scaleY = (val) => Math.round(((val || 0) / clientH) * targetH);
+
+    const x = Math.max(0, Math.min(targetW, scaleX(data.x)));
+    const y = Math.max(0, Math.min(targetH, scaleY(data.y)));
 
     if (sock && !sock.destroyed) {
       switch (action) {
@@ -396,8 +410,8 @@ async function injectInput(serial, action, data) {
           // giving instant, silky-smooth native Android scrolling physics with ZERO lag!
           const rawVx = (data && typeof data.vx === 'number') ? data.vx : 0;
           const rawVy = (data && typeof data.vy === 'number') ? data.vy : 0;
-          const scaleFactorX = targetW / srcW;
-          const scaleFactorY = targetH / srcH;
+          const scaleFactorX = targetW / clientW;
+          const scaleFactorY = targetH / clientH;
           const vx = rawVx * scaleFactorX;
           const vy = rawVy * scaleFactorY;
           const speed = Math.hypot(vx, vy);
