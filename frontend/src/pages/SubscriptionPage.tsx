@@ -94,6 +94,27 @@ export const SubscriptionPage: React.FC = () => {
     }
   };
 
+  const handlePaymentSuccess = async (response: any, plan: 'starter' | 'enterprise') => {
+    setActionLoading('verifying');
+    try {
+      // Confirm deposit with backend & verify via Paystack API
+      const verifyRes = await ApiService.verifyPaystackPayment(response.reference, plan);
+      if (verifyRes.success) {
+        setSubData(verifyRes.status);
+        setFeedback({
+          type: 'success',
+          message: `✅ Payment verified successfully! Your ${plan.toUpperCase()} subscription is active. All streams are unlocked.`,
+        });
+      } else {
+        setFeedback({ type: 'error', message: verifyRes.message || 'Payment verification failed.' });
+      }
+    } catch (vErr: any) {
+      setFeedback({ type: 'error', message: vErr.message || 'Failed to verify payment with server.' });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handlePaystackPayment = async (plan: 'starter' | 'enterprise') => {
     setActionLoading(`pay-${plan}`);
     setFeedback(null);
@@ -106,9 +127,13 @@ export const SubscriptionPage: React.FC = () => {
         throw new Error('Paystack payment gateway is loading. Please retry in 3 seconds.');
       }
 
+      const paystackKey = initData.publicKey || (import.meta.env.VITE_PAYSTACK_PUBLIC_KEY as string) || (typeof atob !== 'undefined' ? atob('cGtfbGl2ZV81NThlMWVkODExNGM2M2MwOWIxMzViMTUyMzQ0M2VjZmZmYjYwNTI0') : '');
+
       // 2. Open Paystack Inline Checkout Modal inside the web app (never redirecting outside!)
+      // Note: callback must be a standard synchronous function reference for Paystack's validation
       const handler = window.PaystackPop.setup({
-        key: initData.publicKey || (import.meta.env.VITE_PAYSTACK_PUBLIC_KEY as string) || (typeof atob !== 'undefined' ? atob('cGtfbGl2ZV81NThlMWVkODExNGM2M2MwOWIxMzViMTUyMzQ0M2VjZmZmYjYwNTI0') : ''),
+        key: paystackKey,
+        publicKey: paystackKey,
         email: initData.email || user?.email,
         amount: initData.amountCents, // 8000 cents ($80 USD) or 10000 cents ($100 USD)
         currency: 'USD',
@@ -121,25 +146,8 @@ export const SubscriptionPage: React.FC = () => {
             { display_name: 'User', variable_name: 'user_email', value: user?.email },
           ],
         },
-        callback: async function (response: any) {
-          setActionLoading('verifying');
-          try {
-            // 3. Confirm deposit with backend & verify via Paystack API
-            const verifyRes = await ApiService.verifyPaystackPayment(response.reference, plan);
-            if (verifyRes.success) {
-              setSubData(verifyRes.status);
-              setFeedback({
-                type: 'success',
-                message: `✅ Payment verified successfully! Your ${plan.toUpperCase()} subscription is active. All streams are unlocked.`,
-              });
-            } else {
-              setFeedback({ type: 'error', message: verifyRes.message || 'Payment verification failed.' });
-            }
-          } catch (vErr: any) {
-            setFeedback({ type: 'error', message: vErr.message || 'Failed to verify payment with server.' });
-          } finally {
-            setActionLoading(null);
-          }
+        callback: function (response: any) {
+          handlePaymentSuccess(response, plan);
         },
         onClose: function () {
           setActionLoading(null);
