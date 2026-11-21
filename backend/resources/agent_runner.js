@@ -184,6 +184,7 @@ function captureScreenshot(serial) {
 const shellSessions = new Map(); // serial -> ChildProcess
 const controlSockets = new Map(); // serial -> net.Socket
 const lastShellTouch = new Map(); // serial -> { x, y, time }
+const deviceRotations = new Map(); // serial -> number (0=portrait, 1=landscape 90, 2=portrait 180, 3=landscape 270)
 const deviceDimensions = new Map(); // serial -> { width, height }
 
 function getDeviceShell(serial) {
@@ -506,6 +507,28 @@ async function injectInput(serial, action, data) {
             execFile(adbPath, ['-s', serial, 'reboot'], () => {});
           } catch (e) {}
           return true;
+        case 'rotate': {
+          const curRot = deviceRotations.get(serial) || 0;
+          const nextRot = (curRot + 1) % 4; // Cycle 0 -> 1 -> 2 -> 3
+          deviceRotations.set(serial, nextRot);
+
+          // 1. Send native scrcpy SC_CONTROL_MSG_TYPE_ROTATE_DEVICE (type 11)
+          try {
+            sock.write(Buffer.from([11]));
+          } catch (e) {}
+
+          // 2. Lock Android orientation to prevent auto-rotate sensor snap-back
+          sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
+
+          // 3. Request keyframe after rotation completes so video player gets fresh SPS/PPS
+          setTimeout(() => {
+            const s = controlSockets.get(serial);
+            if (s && !s.destroyed) {
+              try { s.write(Buffer.from([17])); } catch (e) {}
+            }
+          }, 350);
+          return true;
+        }
       }
     }
 
@@ -571,10 +594,13 @@ async function injectInput(serial, action, data) {
           execFile(adbPath, ['-s', serial, 'reboot'], () => {});
         } catch (e) {}
         return true;
-      case 'rotate':
-        const r = data && data.orientation === 'landscape' ? '1' : '0';
-        sendShellInput(serial, `settings put system user_rotation ${r}`);
+      case 'rotate': {
+        const curRot = deviceRotations.get(serial) || 0;
+        const nextRot = (curRot + 1) % 4;
+        deviceRotations.set(serial, nextRot);
+        sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}`);
         return true;
+      }
       case 'text':
         const escaped = (data.text || '').replace(/([^\w])/g, '\\$1');
         sendShellInput(serial, `input text ${escaped}`);

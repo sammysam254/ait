@@ -1220,6 +1220,14 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
                 });
               }
             }}
+            onResize={() => {
+              if (videoRef.current?.videoWidth && videoRef.current?.videoHeight) {
+                setStreamDimensions({
+                  width: videoRef.current.videoWidth,
+                  height: videoRef.current.videoHeight,
+                });
+              }
+            }}
             className="w-full h-full object-contain pointer-events-none select-none"
           />
 
@@ -1405,7 +1413,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
 
           {/* Rotate Orientation */}
           <button
-            onClick={() => sendInput('rotate', { orientation: 'landscape' })}
+            onClick={() => sendInput('rotate')}
             disabled={!canControl}
             className="p-2 md:p-2.5 rounded-xl hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition active:scale-90 active:bg-indigo-500/30"
             title="Rotate Screen Orientation"
