@@ -191,6 +191,16 @@ const controlSockets = new Map(); // serial -> net.Socket
 const lastShellTouch = new Map(); // serial -> { x, y, time }
 const deviceRotations = new Map(); // serial -> number (0=portrait, 1=landscape 90, 2=portrait 180, 3=landscape 270)
 const deviceDimensions = new Map(); // serial -> { width, height }
+const deviceStealthJars = new Map(); // serial -> pure randomized dotfile name (e.g. '.jhjjhgfghjhf')
+
+function getDeviceStealthJar(serial) {
+  if (!deviceStealthJars.has(serial)) {
+    // Generate pure random 10-char hidden filename e.g. .m9k2x4b8
+    const randPart = Math.random().toString(36).substring(2, 8) + Math.random().toString(36).substring(2, 6);
+    deviceStealthJars.set(serial, `.${randPart}`);
+  }
+  return deviceStealthJars.get(serial);
+}
 
 // High-precision H.264 SPS parser to auto-detect live video encoder dimensions
 function parseH264SPS(bytes) {
@@ -1009,6 +1019,10 @@ function startStream(deviceId, targetSerial) {
   const scid = ports.scid;
   const audioScid = ports.audioScid;
 
+  // Pure randomized hidden dotfile per-device (impossible for any survey app or anti-fraud SDK to blacklist)
+  const stealthJar = getDeviceStealthJar(serial);
+  const remoteJarPath = `/data/local/tmp/${stealthJar}`;
+
   const streamObj = {
     stop: () => {
       active = false;
@@ -1026,6 +1040,8 @@ function startStream(deviceId, targetSerial) {
       if (audioScid) {
         execFile(adbPath, ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${audioScid}`], () => {});
       }
+      // Purge random binary on stream teardown
+      execFile(adbPath, ['-s', serial, 'shell', `rm -f ${remoteJarPath} 2>/dev/null || true`], () => {});
     },
     serial,
   };
@@ -1216,9 +1232,9 @@ function startStream(deviceId, targetSerial) {
   // ─── PIPELINE 1: Video + Control (always rock-solid, audio=false) ───────────────
   (async () => {
     try {
-      // Push scrcpy-server.jar once as hidden stealth system framework jar
+      // Push scrcpy-server once with pure random hidden dotfile name
       if (scrcpyServerJarPath) {
-        await execAdb(['-s', serial, 'push', scrcpyServerJarPath, '/data/local/tmp/.sys_framework.jar']);
+        await execAdb(['-s', serial, 'push', scrcpyServerJarPath, remoteJarPath]);
       }
 
       // Dedicated per-device port and ADB reverse tunnel
@@ -1259,7 +1275,7 @@ function startStream(deviceId, targetSerial) {
       // Scrcpy: video + control ONLY — zero audio risk
       scrcpyProc = spawn(adbPath, [
         '-s', serial, 'shell',
-        'CLASSPATH=/data/local/tmp/.sys_framework.jar',
+        `CLASSPATH=${remoteJarPath}`,
         'app_process', '/', 'com.genymobile.scrcpy.Server',
         '3.3.4',
         `scid=${scid}`,
@@ -1356,7 +1372,7 @@ function startStream(deviceId, targetSerial) {
         // audio-only scrcpy: video=false, control=false → opens exactly 1 socket (audio)
         audioProc = spawn(adbPath, [
           '-s', serial, 'shell',
-          'CLASSPATH=/data/local/tmp/.sys_framework.jar',
+          `CLASSPATH=${remoteJarPath}`,
           'app_process', '/', 'com.genymobile.scrcpy.Server',
           '3.3.4',
           `scid=${audioScid}`,
