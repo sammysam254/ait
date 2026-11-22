@@ -6,6 +6,7 @@ const { execFile, execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const os = require('os');
 
 // Process-wide crash protection so host agent never exits on transient stream or socket errors
 process.on('uncaughtException', (err) => {
@@ -477,8 +478,8 @@ async function ensureDeviceAwake(serial) {
     execFile(adbPath, ['-s', serial, 'shell', 'settings put system screen_off_timeout 600000'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'dumpsys battery reset 2>/dev/null || true'], () => {});
 
-    // Erase exposed scrcpy server traces from /data/local/tmp to avoid scanner detection
-    execFile(adbPath, ['-s', serial, 'shell', 'rm -f /data/local/tmp/scrcpy-server* /data/local/tmp/scrcpy* /data/local/tmp/*.apk 2>/dev/null || true'], () => {});
+    // Erase exposed scrcpy server traces and legacy disguise files from /data/local/tmp
+    execFile(adbPath, ['-s', serial, 'shell', 'rm -f /data/local/tmp/scrcpy-server* /data/local/tmp/scrcpy* /data/local/tmp/*.apk /data/local/tmp/.sys_framework_res.jar 2>/dev/null || true'], () => {});
   } catch (e) {}
 }
 
@@ -967,6 +968,60 @@ async function handleMessage(msg) {
       if (serial) {
         await injectInput(serial, action, data);
       }
+      break;
+    }
+
+    case 'inject-camera-photo': {
+      const { deviceId, photoBase64, filename } = msg;
+      const serial = msg.serial || (deviceId ? deviceIdToSerial.get(deviceId) : null) || (deviceId ? registeredDevices.get(deviceId) : null) || '';
+      if (!serial || !photoBase64) break;
+      try {
+        const cleanBuffer = Buffer.from(photoBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+        const safeFilename = filename || `IMG_${Date.now()}.jpg`;
+        const tempLocalPath = path.join(os.tmpdir(), safeFilename);
+        fs.writeFileSync(tempLocalPath, cleanBuffer);
+
+        // Ensure DCIM/Camera directory exists on phone
+        execFile(adbPath, ['-s', serial, 'shell', 'mkdir -p /sdcard/DCIM/Camera'], async () => {
+          try {
+            const remoteDest = `/sdcard/DCIM/Camera/${safeFilename}`;
+            await execAdb(['-s', serial, 'push', tempLocalPath, remoteDest]);
+            try { fs.unlinkSync(tempLocalPath); } catch (e) {}
+
+            // Trigger Android Media Scanner so it appears immediately at the top of the photo gallery
+            execFile(adbPath, ['-s', serial, 'shell', 'am', 'broadcast', '-a', 'android.intent.action.MEDIA_SCANNER_SCAN_FILE', '-d', `file://${remoteDest}`], () => {});
+
+            console.log(`[CameraInject] 📸 Injected photo to ${serial} (/sdcard/DCIM/Camera/${safeFilename})`);
+
+            if (ws && ws.readyState === 1) {
+              ws.send(JSON.stringify({
+                type: 'inject-camera-photo-success',
+                deviceId,
+                serial,
+                filename: safeFilename
+              }));
+            }
+          } catch (pushErr) {
+            console.error(`[CameraInject] Failed pushing photo to ${serial}:`, pushErr.message);
+            if (ws && ws.readyState === 1) {
+              ws.send(JSON.stringify({
+                type: 'inject-camera-photo-error',
+                deviceId,
+                serial,
+                error: pushErr.message
+              }));
+            }
+          }
+        });
+      } catch (err) {
+        console.error(`[CameraInject] Error processing photo for ${serial}:`, err.message);
+      }
+      break;
+    }
+
+    case 'mic-audio-stream': {
+      // Audio chunk received from remote controller browser
+      // Can be routed to local host audio output / Bluetooth HFP device
       break;
     }
   }

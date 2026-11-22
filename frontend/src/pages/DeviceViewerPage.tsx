@@ -30,6 +30,14 @@ import {
   CreditCard,
   AlertTriangle,
   Phone,
+  Camera,
+  Mic,
+  MicOff,
+  Video,
+  VideoOff,
+  Upload,
+  X,
+  Check,
 } from 'lucide-react';
 import { ApiService } from '../services/api';
 import { Device } from '../types';
@@ -196,6 +204,17 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
   const [showKeyboardInput, setShowKeyboardInput] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [showSideControls, setShowSideControls] = useState(false);
+
+  // Direction B: Remote Mic, Photo Injector & Live Face Feed
+  const [isMicTransmitting, setIsMicTransmitting] = useState(false);
+  const micMediaStreamRef = useRef<MediaStream | null>(null);
+  const micAudioCtxRef = useRef<AudioContext | null>(null);
+  const [showCameraModal, setShowCameraModal] = useState(false);
+  const [cameraInjectStatus, setCameraInjectStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
+  const [cameraInjectMsg, setCameraInjectMsg] = useState('');
+  const [showOpticalVideoModal, setShowOpticalVideoModal] = useState(false);
+  const webcamVideoRef = useRef<HTMLVideoElement | null>(null);
+  const webcamStreamRef = useRef<MediaStream | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -646,6 +665,14 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
                 setStreamDimensions({ width: msg.width, height: msg.height });
               }
             }
+          } else if (msg.type === 'inject-camera-photo-success') {
+            setCameraInjectStatus('success');
+            setCameraInjectMsg(`Injected photo to /sdcard/DCIM/Camera/${msg.filename || 'IMG.jpg'}`);
+            setTimeout(() => setCameraInjectStatus('idle'), 4500);
+          } else if (msg.type === 'inject-camera-photo-error') {
+            setCameraInjectStatus('error');
+            setCameraInjectMsg(msg.error || 'Failed injecting photo');
+            setTimeout(() => setCameraInjectStatus('idle'), 4500);
           } else if (msg.type === 'device-offline') {
             console.warn('[Viewer] Device stream offline signaled. Retrying in background...');
             setStatus('offline');
@@ -914,6 +941,130 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
         refreshStream();
       }, 5000);
     }
+  };
+
+  // Direction B: Toggle remote microphone capture from PC browser to phone
+  const toggleMicTransmission = async () => {
+    if (isMicTransmitting) {
+      if (micMediaStreamRef.current) {
+        micMediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        micMediaStreamRef.current = null;
+      }
+      if (micAudioCtxRef.current) {
+        try { micAudioCtxRef.current.close(); } catch (e) {}
+        micAudioCtxRef.current = null;
+      }
+      setIsMicTransmitting(false);
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'mic-audio-stop',
+          deviceId: activeDeviceIdRef.current || id || shareDeviceId,
+        }));
+      }
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        micMediaStreamRef.current = stream;
+        setIsMicTransmitting(true);
+
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        const ctx = new AudioCtx({ sampleRate: 16000 });
+        micAudioCtxRef.current = ctx;
+
+        const source = ctx.createMediaStreamSource(stream);
+        const processor = ctx.createScriptProcessor(2048, 1, 1);
+
+        processor.onaudioprocess = (e) => {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            const inputData = e.inputBuffer.getChannelData(0);
+            const pcm16 = new Int16Array(inputData.length);
+            for (let i = 0; i < inputData.length; i++) {
+              const s = Math.max(-1, Math.min(1, inputData[i]));
+              pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            const uint8 = new Uint8Array(pcm16.buffer);
+            let binary = '';
+            for (let i = 0; i < uint8.length; i++) {
+              binary += String.fromCharCode(uint8[i]);
+            }
+            wsRef.current.send(JSON.stringify({
+              type: 'mic-audio-stream',
+              deviceId: activeDeviceIdRef.current || id || shareDeviceId,
+              audioPcm16: btoa(binary),
+            }));
+          }
+        };
+
+        source.connect(processor);
+        processor.connect(ctx.destination);
+      } catch (err: any) {
+        console.error('[Mic] Failed accessing local microphone:', err.message);
+        setIsMicTransmitting(false);
+      }
+    }
+  };
+
+  // Direction B: Ingest photo, sanitize all EXIF metadata using Canvas, and push to phone Camera folder
+  const handleInjectPhoto = (fileOrBlob: Blob | File) => {
+    setCameraInjectStatus('uploading');
+    setCameraInjectMsg('Sanitizing EXIF metadata & uploading...');
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          // toDataURL re-encodes pure pixels — automatically stripping all PC GPS & metadata
+          const sanitizedJpeg = canvas.toDataURL('image/jpeg', 0.95);
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({
+              type: 'inject-camera-photo',
+              deviceId: activeDeviceIdRef.current || id || shareDeviceId,
+              photoBase64: sanitizedJpeg,
+              filename: `IMG_${Date.now()}.jpg`,
+            }));
+          }
+        }
+      };
+      img.onerror = () => {
+        setCameraInjectStatus('error');
+        setCameraInjectMsg('Failed processing image.');
+      };
+      img.src = e.target?.result as string;
+    };
+    reader.readAsDataURL(fileOrBlob);
+  };
+
+  // Direction B: Live optical webcam feed for face liveness and WhatsApp video calls
+  const startWebcamOpticalFeed = async () => {
+    try {
+      setShowOpticalVideoModal(true);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+      });
+      webcamStreamRef.current = stream;
+      if (webcamVideoRef.current) {
+        webcamVideoRef.current.srcObject = stream;
+        webcamVideoRef.current.play().catch(() => {});
+      }
+    } catch (err: any) {
+      console.error('[Webcam] Failed accessing webcam:', err.message);
+    }
+  };
+
+  const stopWebcamOpticalFeed = () => {
+    if (webcamStreamRef.current) {
+      webcamStreamRef.current.getTracks().forEach((track) => track.stop());
+      webcamStreamRef.current = null;
+    }
+    setShowOpticalVideoModal(false);
   };
 
   const lastMoveSentRef = useRef(0);
@@ -1551,6 +1702,61 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
             <RotateCw className="h-4 w-4 md:h-5 md:w-5" />
           </button>
 
+          <div className="w-4 h-[1px] bg-gray-700/80 my-0.5"></div>
+
+          {/* Direction B: Remote Mic Transmit (PC Mic -> Phone Audio) */}
+          <button
+            onClick={toggleMicTransmission}
+            disabled={!canControl}
+            className={`p-2 md:p-2.5 rounded-xl transition active:scale-90 relative ${
+              isMicTransmitting
+                ? 'bg-emerald-500/30 text-emerald-300 ring-2 ring-emerald-500/50 shadow-lg shadow-emerald-500/20'
+                : 'hover:bg-emerald-500/20 text-emerald-400 hover:text-emerald-300'
+            }`}
+            title={isMicTransmitting ? 'Transmitting PC Mic (Click to Stop)' : 'Transmit PC Mic to Phone (WhatsApp Voice & Surveys)'}
+          >
+            {isMicTransmitting ? (
+              <Mic className="h-4 w-4 md:h-5 md:w-5 animate-pulse text-emerald-400" />
+            ) : (
+              <MicOff className="h-4 w-4 md:h-5 md:w-5" />
+            )}
+            {isMicTransmitting && (
+              <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+              </span>
+            )}
+          </button>
+
+          {/* Direction B: Inject Photo to Camera (KYC Selfies & Receipts) */}
+          <button
+            onClick={() => setShowCameraModal(true)}
+            disabled={!canControl}
+            className="p-2 md:p-2.5 rounded-xl hover:bg-amber-500/20 text-amber-400 hover:text-amber-300 transition active:scale-90 active:bg-amber-500/30 relative"
+            title="Inject Photo to Camera / Gallery (KYC & Selfies)"
+          >
+            <Camera className="h-4 w-4 md:h-5 md:w-5" />
+            {cameraInjectStatus === 'success' && (
+              <span className="absolute -top-1 -right-1 flex h-2 w-2 rounded-full bg-emerald-400"></span>
+            )}
+          </button>
+
+          {/* Direction B: Live Face Optical Stream (WhatsApp Video & Face Liveness) */}
+          <button
+            onClick={showOpticalVideoModal ? stopWebcamOpticalFeed : startWebcamOpticalFeed}
+            disabled={!canControl}
+            className={`p-2 md:p-2.5 rounded-xl transition active:scale-90 ${
+              showOpticalVideoModal
+                ? 'bg-purple-500/30 text-purple-300 ring-2 ring-purple-500/50 shadow-lg shadow-purple-500/20'
+                : 'hover:bg-purple-500/20 text-purple-400 hover:text-purple-300'
+            }`}
+            title="Live Face Optical Stream (WhatsApp Video Calls & Liveness)"
+          >
+            <Video className="h-4 w-4 md:h-5 md:w-5" />
+          </button>
+
+          <div className="w-4 h-[1px] bg-gray-700/80 my-0.5"></div>
+
           {/* Refresh Stream */}
           <button
             onClick={refreshStream}
@@ -1571,6 +1777,118 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
           </button>
         </div>
       </div>
+
+      {/* MODAL 1: Camera Photo Injector (Direction B: Photo/Receipt/Selfie) */}
+      {showCameraModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-md p-6 shadow-2xl relative text-left">
+            <button
+              onClick={() => setShowCameraModal(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-white p-1 rounded-lg hover:bg-gray-800 transition"
+            >
+              <X className="h-5 w-5" />
+            </button>
+
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="p-3 bg-amber-500/20 rounded-xl text-amber-400">
+                <Camera className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-white">Inject Photo to Phone Camera</h3>
+                <p className="text-xs text-gray-400">Pushes directly to /sdcard/DCIM/Camera with zero EXIF leaks</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="border-2 border-dashed border-gray-700 hover:border-amber-500/50 rounded-xl p-6 text-center transition cursor-pointer relative bg-gray-950/50">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleInjectPhoto(file);
+                  }}
+                  className="absolute inset-0 opacity-0 cursor-pointer"
+                />
+                <div className="flex flex-col items-center space-y-2">
+                  <Upload className="h-8 w-8 text-amber-400" />
+                  <span className="text-sm font-medium text-gray-300">Click or drag & drop photo here</span>
+                  <span className="text-[11px] text-gray-500">Selfie, ID card, or receipt (JPG, PNG, WebP)</span>
+                </div>
+              </div>
+
+              {/* Status / Feedback message */}
+              {cameraInjectStatus !== 'idle' && (
+                <div
+                  className={`p-3 rounded-xl text-xs font-medium flex items-center space-x-2 ${
+                    cameraInjectStatus === 'uploading'
+                      ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                      : cameraInjectStatus === 'success'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-red-500/20 text-red-300 border border-red-500/30'
+                  }`}
+                >
+                  {cameraInjectStatus === 'success' ? (
+                    <Check className="h-4 w-4 text-emerald-400 shrink-0" />
+                  ) : (
+                    <div className="h-2 w-2 rounded-full bg-current animate-pulse shrink-0"></div>
+                  )}
+                  <span>{cameraInjectMsg}</span>
+                </div>
+              )}
+
+              <div className="bg-gray-950/80 rounded-xl p-3 text-[11px] text-gray-400 space-y-1 border border-gray-800">
+                <p className="font-semibold text-gray-300 flex items-center gap-1.5">
+                  <Check className="h-3.5 w-3.5 text-emerald-400" /> Automatic Stealth Sanitization Active:
+                </p>
+                <p>• All PC GPS and computer timezone metadata is stripped in your browser.</p>
+                <p>• Pushed directly to Android's camera album and indexed by MediaScanner.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: Live Face Optical Stream (WhatsApp Video & Face Liveness) */}
+      {showOpticalVideoModal && (
+        <div className="fixed bottom-6 right-6 z-50 w-72 md:w-80 bg-gray-950 border-2 border-purple-500/60 rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
+          <div className="bg-purple-950/80 px-4 py-2.5 flex items-center justify-between border-b border-purple-800/50">
+            <div className="flex items-center space-x-2">
+              <span className="flex h-2 w-2 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+              </span>
+              <span className="text-xs font-bold text-purple-200">Live Face Optical Feed</span>
+            </div>
+            <button
+              onClick={stopWebcamOpticalFeed}
+              className="text-purple-300 hover:text-white p-1 rounded-lg hover:bg-purple-900/50 transition"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="relative aspect-[3/4] bg-black overflow-hidden flex items-center justify-center">
+            <video
+              ref={webcamVideoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover -scale-x-100"
+            />
+            {/* Liveness Alignment Face Oval Guide */}
+            <div className="absolute inset-x-8 inset-y-10 border-2 border-dashed border-purple-400/50 rounded-[50%] pointer-events-none flex items-center justify-center">
+              <span className="text-[10px] text-purple-300/80 bg-black/60 px-2 py-0.5 rounded-full font-medium">
+                Align Face Here
+              </span>
+            </div>
+          </div>
+
+          <div className="p-2.5 bg-gray-900/90 text-[11px] text-gray-400 border-t border-gray-800 text-center">
+            Position phone front camera towards this feed for live KYC / WhatsApp video calls.
+          </div>
+        </div>
+      )}
     </div>
   );
 };

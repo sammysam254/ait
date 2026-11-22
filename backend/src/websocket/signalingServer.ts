@@ -389,6 +389,21 @@ export class SignalingServer {
             break;
           }
 
+          case 'inject-camera-photo-success':
+          case 'inject-camera-photo-error': {
+            const { deviceId } = msg;
+            const targetDevId = deviceId || session.deviceId;
+            if (targetDevId) {
+              const room = this.getRoom(targetDevId);
+              for (const viewer of room.viewers) {
+                if (viewer.ws.readyState === WebSocket.OPEN) {
+                  viewer.ws.send(JSON.stringify(msg));
+                }
+              }
+            }
+            break;
+          }
+
           case 'ping': {
             if (session.ws.readyState === WebSocket.OPEN) {
               session.ws.send(JSON.stringify({ type: 'pong' }));
@@ -565,6 +580,27 @@ export class SignalingServer {
                 serial: serial || (dev ? dev.adb_serial : ''),
                 action: msg.action,
                 data: humanizedData,
+              }));
+            }
+            break;
+          }
+
+          case 'inject-camera-photo':
+          case 'mic-audio-stream':
+          case 'mic-audio-stop': {
+            if (!session.canControl) {
+              session.ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Unauthorized: You only have view permission for this device.'
+              }));
+              return;
+            }
+            if (agentSession) {
+              room.agent = agentSession;
+              agentSession.ws.send(JSON.stringify({
+                ...msg,
+                deviceId: msg.deviceId || deviceId,
+                serial: serial || (dev ? dev.adb_serial : ''),
               }));
             }
             break;
