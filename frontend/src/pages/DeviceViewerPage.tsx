@@ -997,8 +997,12 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
           }
         };
 
+        // Prevent local speaker feedback while maintaining stream processing
+        const muteGain = ctx.createGain();
+        muteGain.gain.value = 0;
         source.connect(processor);
-        processor.connect(ctx.destination);
+        processor.connect(muteGain);
+        muteGain.connect(ctx.destination);
       } catch (err: any) {
         console.error('[Mic] Failed accessing local microphone:', err.message);
         setIsMicTransmitting(false);

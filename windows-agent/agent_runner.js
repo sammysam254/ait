@@ -1019,9 +1019,93 @@ async function handleMessage(msg) {
       break;
     }
 
+let pcmAudioPlayer = null;
+let pcmAudioIdleTimer = null;
+
+function ensurePcmAudioPlayer() {
+  if (pcmAudioPlayer && !pcmAudioPlayer.killed && pcmAudioPlayer.stdin && pcmAudioPlayer.stdin.writable) {
+    return pcmAudioPlayer;
+  }
+
+  const pcmExeCandidates = [
+    path.join(__dirname, 'resources', 'PcmAudioBridge.exe'),
+    path.join(__dirname, '..', 'resources', 'PcmAudioBridge.exe'),
+    path.join(process.cwd(), 'resources', 'PcmAudioBridge.exe'),
+  ];
+
+  let pcmExe = pcmExeCandidates.find(f => fs.existsSync(f));
+
+  // Auto-compile fallback using native Windows .NET compiler if binary missing
+  if (!pcmExe) {
+    const csFile = path.join(__dirname, 'resources', 'PcmAudioBridge.cs');
+    const targetExe = path.join(__dirname, 'resources', 'PcmAudioBridge.exe');
+    const cscPath = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe';
+    if (fs.existsSync(csFile) && fs.existsSync(cscPath)) {
+      try {
+        require('child_process').execSync(`"${cscPath}" /nologo /out:"${targetExe}" "${csFile}"`, { stdio: 'ignore' });
+        if (fs.existsSync(targetExe)) pcmExe = targetExe;
+      } catch (e) {}
+    }
+  }
+
+  if (!pcmExe) {
+    console.warn('[MicBridge] PcmAudioBridge.exe not found and cannot compile.');
+    return null;
+  }
+
+  try {
+    pcmAudioPlayer = spawn(pcmExe, ['16000'], { stdio: ['pipe', 'ignore', 'ignore'] });
+    pcmAudioPlayer.on('error', (err) => {
+      console.warn('[MicBridge] Audio player process error:', err.message);
+      pcmAudioPlayer = null;
+    });
+    pcmAudioPlayer.on('exit', () => {
+      pcmAudioPlayer = null;
+    });
+    return pcmAudioPlayer;
+  } catch (err) {
+    console.warn('[MicBridge] Failed starting audio player:', err.message);
+    return null;
+  }
+}
+
+function stopPcmAudioPlayer() {
+  if (pcmAudioIdleTimer) {
+    clearTimeout(pcmAudioIdleTimer);
+    pcmAudioIdleTimer = null;
+  }
+  if (pcmAudioPlayer) {
+    try {
+      if (pcmAudioPlayer.stdin && pcmAudioPlayer.stdin.writable) {
+        pcmAudioPlayer.stdin.end();
+      }
+      pcmAudioPlayer.kill();
+    } catch (e) {}
+    pcmAudioPlayer = null;
+  }
+}
+
     case 'mic-audio-stream': {
-      // Audio chunk received from remote controller browser
-      // Can be routed to local host audio output / Bluetooth HFP device
+      if (msg.audioPcm16) {
+        try {
+          const pcmBuf = Buffer.from(msg.audioPcm16, 'base64');
+          const player = ensurePcmAudioPlayer();
+          if (player && player.stdin && player.stdin.writable) {
+            player.stdin.write(pcmBuf);
+            if (pcmAudioIdleTimer) clearTimeout(pcmAudioIdleTimer);
+            pcmAudioIdleTimer = setTimeout(() => {
+              stopPcmAudioPlayer();
+            }, 3000);
+          }
+        } catch (err) {
+          console.error('[MicBridge] Error playing audio chunk:', err.message);
+        }
+      }
+      break;
+    }
+
+    case 'mic-audio-stop': {
+      stopPcmAudioPlayer();
       break;
     }
   }
