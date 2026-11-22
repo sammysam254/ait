@@ -77,28 +77,10 @@ export class DeviceAntiDetectionService {
    */
   static async hardenBatteryBehavior(deviceSerial: string): Promise<void> {
     try {
-      // 1. Simulate realistic battery temperature increase during use
-      // Normal range: 25-35°C idle, 35-45°C during use
-      const currentTemp = await this.getBatteryTemp(deviceSerial);
-      if (currentTemp < 32) {
-        // Gradually increase temperature to realistic "in-use" level
-        await execAsync(`adb -s ${deviceSerial} shell "echo 380 > /sys/class/power_supply/battery/temp" 2>/dev/null || true`);
-      }
-
-      // 2. Ensure battery drain rate matches screen-on activity
-      // Prevent "screen on but no battery drain" anomaly
-      await execAsync(`adb -s ${deviceSerial} shell dumpsys battery set level 99 2>/dev/null || true`);
-      
-      // 3. Disable any USB charging detection that could reveal USB connection
-      if (this.profile.preventChargingAnomaly) {
-        await execAsync(`adb -s ${deviceSerial} shell dumpsys battery set usb 0 2>/dev/null || true`);
-        await execAsync(`adb -s ${deviceSerial} shell dumpsys battery set ac 0 2>/dev/null || true`);
-      }
-
-      // 4. Simulate realistic battery stats
-      await execAsync(`adb -s ${deviceSerial} shell dumpsys battery set status 3 2>/dev/null || true`); // 3 = discharging
+      // Reset any synthetic battery mocks so real battery state is reported naturally
+      await execAsync(`adb -s ${deviceSerial} shell "dumpsys battery reset 2>/dev/null || true"`);
     } catch (error) {
-      // Ignore errors - not all devices support battery manipulation
+      // Ignore errors
     }
   }
 
@@ -502,26 +484,8 @@ export class DeviceAntiDetectionService {
    * USER PRESENCE SIMULATION
    * Occasionally simulate user checking notifications, switching apps
    */
-  static async simulateUserPresence(deviceSerial: string): Promise<void> {
-    if (!this.profile.mimicUserPresence) return;
-
-    try {
-      // 10% chance every minute to "check notifications"
-      if (Math.random() < 0.1) {
-        await execAsync(`adb -s ${deviceSerial} shell input keyevent 83`); // KEYCODE_NOTIFICATION
-        await new Promise(resolve => setTimeout(resolve, 2000 + Math.random() * 3000));
-        await execAsync(`adb -s ${deviceSerial} shell input keyevent 4`); // KEYCODE_BACK
-      }
-
-      // 5% chance to briefly check another app (multitasking behavior)
-      if (Math.random() < 0.05) {
-        await execAsync(`adb -s ${deviceSerial} shell input keyevent 187`); // KEYCODE_APP_SWITCH
-        await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
-        await execAsync(`adb -s ${deviceSerial} shell input keyevent 4`); // KEYCODE_BACK
-      }
-    } catch {
-      // Ignore
-    }
+  static async simulateUserPresence(_deviceSerial: string): Promise<void> {
+    // Disabled: never inject artificial app-switches or notification pulls during active user sessions
   }
 
   /**
@@ -532,9 +496,6 @@ export class DeviceAntiDetectionService {
     if (!this.profile.normalizeSystemStats) return;
 
     try {
-      // Limit CPU governor to make CPU usage look normal
-      await execAsync(`adb -s ${deviceSerial} shell "echo interactive > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" 2>/dev/null || true`);
-
       // Clear logcat to prevent monitoring apps from seeing ADB commands
       await execAsync(`adb -s ${deviceSerial} logcat -c 2>/dev/null || true`);
     } catch {
@@ -549,31 +510,14 @@ export class DeviceAntiDetectionService {
   static async initializeAntiDetection(deviceSerial: string): Promise<void> {
     console.log(`[AntiDetection] Initializing stealth for device ${deviceSerial}`);
 
-    // Run ALL initialization in background - don't block anything
+    // Run safe initialization in background
     Promise.all([
       this.hardenBatteryBehavior(deviceSerial),
       this.hideAdbProcesses(deviceSerial),
       this.normalizeNetworkTraffic(deviceSerial),
       this.mimicNaturalScreenBehavior(deviceSerial),
       this.normalizeSystemStats(deviceSerial),
-    ]).catch(err => {
-      // Silent fail - don't block control if anti-detection fails
-    });
-
-    // Start continuous sensor simulation (background only)
-    setInterval(() => {
-      this.simulateSensorActivity(deviceSerial).catch(() => {});
-    }, 1000);
-
-    // Start periodic user presence simulation (background only)
-    setInterval(() => {
-      this.simulateUserPresence(deviceSerial).catch(() => {});
-    }, 60000); // Every minute
-
-    // Periodic battery behavior updates (background only)
-    setInterval(() => {
-      this.hardenBatteryBehavior(deviceSerial).catch(() => {});
-    }, 30000); // Every 30 seconds
+    ]).catch(() => {});
 
     console.log(`[AntiDetection] Stealth mode active for device ${deviceSerial}`);
   }
@@ -642,13 +586,7 @@ export class DeviceAntiDetectionService {
         await execAsync(`adb -s ${deviceSerial} shell settings put global adb_notify 0`);
       }
       if (risk.includes('screen timeout')) {
-        await execAsync(`adb -s ${deviceSerial} shell settings put system screen_off_timeout 120000`);
-      }
-      if (risk.includes('scrcpy process')) {
-        await execAsync(`adb -s ${deviceSerial} shell pkill -9 scrcpy 2>/dev/null || true`);
-      }
-      if (risk.includes('charging')) {
-        await execAsync(`adb -s ${deviceSerial} shell dumpsys battery set usb 0`);
+        await execAsync(`adb -s ${deviceSerial} shell settings put system screen_off_timeout 600000`);
       }
     }
   }

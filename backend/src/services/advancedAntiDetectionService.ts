@@ -76,17 +76,8 @@ export class AdvancedAntiDetectionService {
    */
   static async spoofBuildFingerprint(deviceSerial: string): Promise<void> {
     try {
-      // Get current release version
-      const { stdout: release } = await execAsync(`adb -s ${deviceSerial} shell getprop ro.build.version.release`);
-      const version = release.trim();
-      
-      // Set generic retail fingerprint (looks like production device)
-      await execAsync(`adb -s ${deviceSerial} shell "setprop ro.build.fingerprint google/sdk_gphone64_arm64/generic:${version}/AOSP/eng.user.retail:user/release-keys 2>/dev/null || true"`);
-      
-      // Hide test-keys
+      // Ensure build tags and type show clean production user release
       await execAsync(`adb -s ${deviceSerial} shell "setprop ro.build.tags release-keys 2>/dev/null || true"`);
-      
-      // Set type to user (not userdebug or eng)
       await execAsync(`adb -s ${deviceSerial} shell "setprop ro.build.type user 2>/dev/null || true"`);
     } catch {
       // Silent fail
@@ -173,13 +164,7 @@ export class AdvancedAntiDetectionService {
     try {
       // Disable screen recording flag
       await execAsync(`adb -s ${deviceSerial} shell "setprop debug.surface.recording 0 2>/dev/null || true"`);
-      
-      // Hide any screen capture indicators
       await execAsync(`adb -s ${deviceSerial} shell "setprop debug.hwui.capture_skp_enabled false 2>/dev/null || true"`);
-      
-      // Disable media projection (screen sharing detection)
-      await execAsync(`adb -s ${deviceSerial} shell "am force-stop com.android.systemui 2>/dev/null || true"`);
-      await execAsync(`adb -s ${deviceSerial} shell "am startservice com.android.systemui/.SystemUIService 2>/dev/null || true"`);
     } catch {
       // Silent fail
     }
@@ -192,8 +177,6 @@ export class AdvancedAntiDetectionService {
    */
   static async normalizeSystemUptime(deviceSerial: string): Promise<void> {
     try {
-      // Don't actually change uptime (impossible), but hide anomalies
-      // Clear any system change logs
       await execAsync(`adb -s ${deviceSerial} shell "logcat -b events -c 2>/dev/null || true"`);
       await execAsync(`adb -s ${deviceSerial} shell "logcat -b system -c 2>/dev/null || true"`);
     } catch {
@@ -210,9 +193,6 @@ export class AdvancedAntiDetectionService {
       // Clear package installer logs
       await execAsync(`adb -s ${deviceSerial} shell "pm clear com.android.packageinstaller 2>/dev/null || true"`);
       await execAsync(`adb -s ${deviceSerial} shell "pm clear com.google.android.packageinstaller 2>/dev/null || true"`);
-      
-      // Clear download history that might show scrcpy download
-      await execAsync(`adb -s ${deviceSerial} shell "pm clear com.android.providers.downloads 2>/dev/null || true"`);
     } catch {
       // Silent fail
     }
@@ -261,13 +241,8 @@ export class AdvancedAntiDetectionService {
    */
   static async clearEmulatorFlags(deviceSerial: string): Promise<void> {
     try {
-      // Set hardware properties to real device values
       await execAsync(`adb -s ${deviceSerial} shell "setprop ro.hardware.type physical 2>/dev/null || true"`);
       await execAsync(`adb -s ${deviceSerial} shell "setprop ro.kernel.qemu 0 2>/dev/null || true"`);
-      await execAsync(`adb -s ${deviceSerial} shell "setprop ro.product.manufacturer real 2>/dev/null || true"`);
-      
-      // Hide any goldfish (emulator) references
-      await execAsync(`adb -s ${deviceSerial} shell "setprop ro.hardware qcom 2>/dev/null || true"`);
     } catch {
       // Silent fail
     }

@@ -386,7 +386,9 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     msg.writeUInt32BE(Math.max(0, Math.min(height, Math.round(y))), 14);
     msg.writeUInt16BE(width, 18);
     msg.writeUInt16BE(height, 20);
-    msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
+    // Natural human touch pressure: varies between 0.45 and 0.80 (realistic capacitive reading)
+    const naturalPressure = action === 1 ? 0 : Math.floor(0x7000 + (Math.random() * 0x3800));
+    msg.writeUInt16BE(naturalPressure, 22);
     msg.writeUInt32BE(0, 24); // action_button: 0 for pure native finger touch (prevents mouse conflicts)
     msg.writeUInt32BE(0, 28); // buttons: 0 for pure native finger touch (prevents dual-controller fighting)
     sock.write(msg);
@@ -445,23 +447,28 @@ async function ensureDeviceAwake(serial) {
     execFile(adbPath, ['-s', serial, 'shell', 'input keyevent 224'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'wm dismiss-keyguard'], () => {});
 
-    // CRITICAL ANTI-DETECTION: Zero out accessibility completely (Stops survey app bans)
+    // BULLETPROOF ANTI-DETECTION: Zero out accessibility completely (Stops survey app bans)
     execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_enabled 0'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put secure enabled_accessibility_services null'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_shortcut_target_service null'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_button_target_component null'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_display_magnification_enabled 0'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put secure high_text_contrast_enabled 0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_large_pointer_icon 0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure speak_password 0'], () => {});
 
-    // Stealth flags: hide USB debugging notification & clear developer overlays
+    // Stealth flags: hide developer options from Settings app & clear debugging banners
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put global development_settings_enabled 0'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put global adb_notify 0'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put system pointer_location 0'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put system show_touches 0'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put secure mock_location 0'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'settings put global hide_error_dialogs 1'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put system screen_off_timeout 600000'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'dumpsys battery reset 2>/dev/null || true'], () => {});
 
     // Erase exposed scrcpy server traces from /data/local/tmp to avoid scanner detection
-    execFile(adbPath, ['-s', serial, 'shell', 'rm -f /data/local/tmp/scrcpy-server* /data/local/tmp/scrcpy* 2>/dev/null || true'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'rm -f /data/local/tmp/scrcpy-server* /data/local/tmp/scrcpy* /data/local/tmp/*.apk 2>/dev/null || true'], () => {});
   } catch (e) {}
 }
 
@@ -530,15 +537,17 @@ async function injectInput(serial, action, data) {
         case 'scroll':
           sendScrcpyScroll(sock, x, y, targetW, targetH, data.hScroll || 0, data.vScroll || 0);
           return true;
-        case 'tap':
+        case 'tap': {
           sendScrcpyTouch(sock, 0, x, y, targetW, targetH);
+          const tapDwell = Math.floor(55 + Math.random() * 40); // 55-95ms natural human dwell time
           setTimeout(() => {
             const s = controlSockets.get(serial);
             if (s && !s.destroyed) {
               sendScrcpyTouch(s, 1, x, y, targetW, targetH);
             }
-          }, 32);
+          }, tapDwell);
           return true;
+        }
         case 'text':
           if (data && data.text) {
             return sendScrcpyText(sock, data.text);
