@@ -14,19 +14,14 @@ export class EmergencyAntiDetectionService {
    */
   static async hideAllAdbTraces(deviceSerial: string): Promise<void> {
     try {
-      // Hide ADB daemon completely
+      // Hide ADB network listening ports
       await execAsync(`adb -s ${deviceSerial} shell "setprop service.adb.tcp.port -1" 2>/dev/null || true`);
       await execAsync(`adb -s ${deviceSerial} shell "setprop persist.adb.tcp.port -1" 2>/dev/null || true`);
       
-      // Set device to appear as non-debuggable
-      await execAsync(`adb -s ${deviceSerial} shell "setprop ro.debuggable 0" 2>/dev/null || true`);
-      await execAsync(`adb -s ${deviceSerial} shell "setprop ro.secure 1" 2>/dev/null || true`);
+      // Hide USB debugging notification banner in the status bar
+      await execAsync(`adb -s ${deviceSerial} shell "settings put global adb_notify 0" 2>/dev/null || true`);
       
-      // Hide developer options completely
-      await execAsync(`adb -s ${deviceSerial} shell "settings put global development_settings_enabled 0" 2>/dev/null || true`);
-      await execAsync(`adb -s ${deviceSerial} shell "settings put global adb_enabled 0" 2>/dev/null || true`);
-      
-      // Clear all ADB logs
+      // Clear logs
       await execAsync(`adb -s ${deviceSerial} logcat -c 2>/dev/null || true`);
       await execAsync(`adb -s ${deviceSerial} shell "logcat -b all -c" 2>/dev/null || true`);
     } catch {
@@ -35,39 +30,40 @@ export class EmergencyAntiDetectionService {
   }
 
   /**
-   * CRITICAL FIX 2: Make USB connection appear as charging only (not data/debugging)
+   * CRITICAL FIX 2: Hide automation, overlays, and debugging indicators without severing USB connection
    */
   static async spoofUsbAsChargingOnly(deviceSerial: string): Promise<void> {
     try {
-      // Set USB to charging mode only
-      await execAsync(`adb -s ${deviceSerial} shell "svc usb setFunctions" 2>/dev/null || true`);
-      await execAsync(`adb -s ${deviceSerial} shell "setprop sys.usb.config charging" 2>/dev/null || true`);
-      
       // Hide USB debugging notification
       await execAsync(`adb -s ${deviceSerial} shell "settings put global adb_notify 0" 2>/dev/null || true`);
       
-      // Make battery show as discharging (not USB charging)
-      await execAsync(`adb -s ${deviceSerial} shell "dumpsys battery set usb 0" 2>/dev/null || true`);
-      await execAsync(`adb -s ${deviceSerial} shell "dumpsys battery set ac 0" 2>/dev/null || true`);
-      await execAsync(`adb -s ${deviceSerial} shell "dumpsys battery set status 3" 2>/dev/null || true`); // 3 = discharging
+      // Disable pointer location overlays
+      await execAsync(`adb -s ${deviceSerial} shell "settings put system pointer_location 0" 2>/dev/null || true`);
+      await execAsync(`adb -s ${deviceSerial} shell "settings put system show_touches 0" 2>/dev/null || true`);
     } catch {
       // Silent fail
     }
   }
 
   /**
-   * CRITICAL FIX 3: Remove ALL automation/remote control indicators
+   * CRITICAL FIX 3: Remove ALL accessibility & automation indicators (Fixes survey app bans)
    */
   static async removeAutomationIndicators(deviceSerial: string): Promise<void> {
     try {
-      // Disable accessibility services (automation detection)
-      await execAsync(`adb -s ${deviceSerial} shell "settings put secure enabled_accessibility_services null" 2>/dev/null || true`);
+      // Completely disable accessibility services & shortcuts (kills automation/bot detection in survey apps)
       await execAsync(`adb -s ${deviceSerial} shell "settings put secure accessibility_enabled 0" 2>/dev/null || true`);
+      await execAsync(`adb -s ${deviceSerial} shell "settings put secure enabled_accessibility_services null" 2>/dev/null || true`);
+      await execAsync(`adb -s ${deviceSerial} shell "settings put secure accessibility_shortcut_target_service null" 2>/dev/null || true`);
+      await execAsync(`adb -s ${deviceSerial} shell "settings put secure accessibility_button_target_component null" 2>/dev/null || true`);
+      await execAsync(`adb -s ${deviceSerial} shell "settings put secure accessibility_display_magnification_enabled 0" 2>/dev/null || true`);
+      
+      // Disable mock location
+      await execAsync(`adb -s ${deviceSerial} shell "settings put secure mock_location 0" 2>/dev/null || true`);
       
       // Disable unknown sources
       await execAsync(`adb -s ${deviceSerial} shell "settings put secure install_non_market_apps 0" 2>/dev/null || true`);
       
-      // Hide screen overlay permission
+      // Hide error dialogs
       await execAsync(`adb -s ${deviceSerial} shell "settings put global hide_error_dialogs 1" 2>/dev/null || true`);
     } catch {
       // Silent fail

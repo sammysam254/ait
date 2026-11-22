@@ -59,23 +59,10 @@ export class PerformanceOptimizationService {
    */
   static async optimizeDevicePerformance(deviceSerial: string): Promise<void> {
     try {
-      // Disable animations (instant response)
-      await execAsync(`adb -s ${deviceSerial} shell "settings put global window_animation_scale 0"`);
-      await execAsync(`adb -s ${deviceSerial} shell "settings put global transition_animation_scale 0"`);
-      await execAsync(`adb -s ${deviceSerial} shell "settings put global animator_duration_scale 0"`);
-      
-      // Set performance governor (max CPU speed)
-      await execAsync(`adb -s ${deviceSerial} shell "echo performance > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" 2>/dev/null || true`);
-      
-      // Disable background data sync (reduces CPU load)
-      await execAsync(`adb -s ${deviceSerial} shell "settings put global background_data 0" 2>/dev/null || true`);
-      
-      // Kill unnecessary background apps
-      await execAsync(`adb -s ${deviceSerial} shell "am kill-all" 2>/dev/null || true`);
-      
-      // Clear RAM
-      await execAsync(`adb -s ${deviceSerial} shell "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true`);
-      
+      // Disable window animations for instant, crisp response
+      await execAsync(`adb -s ${deviceSerial} shell "settings put global window_animation_scale 0" 2>/dev/null || true`);
+      await execAsync(`adb -s ${deviceSerial} shell "settings put global transition_animation_scale 0" 2>/dev/null || true`);
+      await execAsync(`adb -s ${deviceSerial} shell "settings put global animator_duration_scale 0" 2>/dev/null || true`);
     } catch {
       // Silent fail
     }
@@ -125,34 +112,12 @@ export class PerformanceOptimizationService {
    */
   private static lagCounters = new Map<string, number>();
 
-  static reportLag(deviceSerial: string): void {
-    const count = (this.lagCounters.get(deviceSerial) || 0) + 1;
-    this.lagCounters.set(deviceSerial, count);
-
-    // If lagging 3+ times in short period, restart scrcpy
-    if (count >= 3) {
-      console.log(`[Performance] Lag detected on ${deviceSerial}, restarting...`);
-      this.restartScrcpy(deviceSerial).catch(() => {});
-      this.lagCounters.set(deviceSerial, 0);
-    }
+  static reportLag(_deviceSerial: string): void {
+    // Passive logging only - never drop active sessions
   }
 
-  static async restartScrcpy(deviceSerial: string): Promise<void> {
-    try {
-      // Kill existing scrcpy
-      await execAsync(`adb -s ${deviceSerial} shell "pkill -9 app_process" 2>/dev/null || true`);
-      await execAsync(`adb -s ${deviceSerial} shell "pkill -9 scrcpy" 2>/dev/null || true`);
-      
-      // Clear video encoder cache
-      await execAsync(`adb -s ${deviceSerial} shell "sync && echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true`);
-      
-      // Wait 2 seconds
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      console.log(`[Performance] Scrcpy restart ready for ${deviceSerial}`);
-    } catch {
-      // Silent fail
-    }
+  static async restartScrcpy(_deviceSerial: string): Promise<void> {
+    // No-op: Agent manages scrcpy lifecycle natively with auto-reconnect
   }
 
   /**
@@ -228,32 +193,10 @@ export class PerformanceOptimizationService {
   }
 
   /**
-   * OPTIMIZATION 8: Continuous performance monitoring
+   * Continuous performance monitoring (passive health check without killing active processes)
    */
-  static startPerformanceMonitoring(deviceSerial: string): void {
-    setInterval(async () => {
-      try {
-        // Check CPU usage
-        const { stdout: cpuInfo } = await execAsync(`adb -s ${deviceSerial} shell "top -n 1 | grep scrcpy" 2>/dev/null || true`);
-        
-        if (cpuInfo && cpuInfo.includes('100%')) {
-          // CPU maxed out, restart scrcpy
-          console.log(`[Performance] High CPU on ${deviceSerial}, restarting scrcpy`);
-          await this.restartScrcpy(deviceSerial);
-        }
-
-        // Check memory
-        const { stdout: memInfo } = await execAsync(`adb -s ${deviceSerial} shell "cat /proc/meminfo | grep MemAvailable" 2>/dev/null || true`);
-        const memMatch = memInfo.match(/(\d+)/);
-        if (memMatch && parseInt(memMatch[1]) < 200000) {
-          // Less than 200MB free, clear cache
-          await execAsync(`adb -s ${deviceSerial} shell "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true`);
-        }
-
-      } catch {
-        // Silent fail
-      }
-    }, 30000); // Every 30 seconds
+  static startPerformanceMonitoring(_deviceSerial: string): void {
+    // Keep monitor passive - NEVER restart or kill processes while user is interacting
   }
 
   /**

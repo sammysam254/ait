@@ -387,8 +387,8 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     msg.writeUInt16BE(width, 18);
     msg.writeUInt16BE(height, 20);
     msg.writeUInt16BE(action === 1 ? 0 : 0xffff, 22); // pressure (1.0 when touching, 0 when released)
-    msg.writeUInt32BE(action === 0 ? 1 : 0, 24); // action_button: AMOTION_EVENT_BUTTON_PRIMARY on down
-    msg.writeUInt32BE(action === 1 ? 0 : 1, 28); // buttons: AMOTION_EVENT_BUTTON_PRIMARY active while touching
+    msg.writeUInt32BE(0, 24); // action_button: 0 for pure native finger touch (prevents mouse conflicts)
+    msg.writeUInt32BE(0, 28); // buttons: 0 for pure native finger touch (prevents dual-controller fighting)
     sock.write(msg);
     return true;
   } catch (e) {
@@ -399,7 +399,6 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
 function sendScrcpyText(sock, text) {
   try {
     if (!sock || sock.destroyed || !text) return false;
-    const textBuf = Buffer.from(text, 'utf8');
     // SC_CONTROL_MSG_TYPE_INJECT_TEXT (type = 1): 1 byte type, 4 bytes length, text bytes
     const msg = Buffer.alloc(5 + textBuf.length);
     msg.writeUInt8(1, 0); // type: INJECT_TEXT
@@ -445,6 +444,24 @@ async function ensureDeviceAwake(serial) {
     execFile(adbPath, ['-s', serial, 'shell', 'svc power stayon true'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'input keyevent 224'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'wm dismiss-keyguard'], () => {});
+
+    // CRITICAL ANTI-DETECTION: Zero out accessibility completely (Stops survey app bans)
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_enabled 0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure enabled_accessibility_services null'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_shortcut_target_service null'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_button_target_component null'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure accessibility_display_magnification_enabled 0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure high_text_contrast_enabled 0'], () => {});
+
+    // Stealth flags: hide USB debugging notification & clear developer overlays
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put global adb_notify 0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put system pointer_location 0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put system show_touches 0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure mock_location 0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put global hide_error_dialogs 1'], () => {});
+
+    // Erase exposed scrcpy server traces from /data/local/tmp to avoid scanner detection
+    execFile(adbPath, ['-s', serial, 'shell', 'rm -f /data/local/tmp/scrcpy-server* /data/local/tmp/scrcpy* 2>/dev/null || true'], () => {});
   } catch (e) {}
 }
 
@@ -595,38 +612,28 @@ async function injectInput(serial, action, data) {
           } catch (e) {}
           return true;
         case 'rotate': {
-          execFile(adbPath, ['-s', serial, 'shell', 'settings get system user_rotation'], (err, stdout) => {
-            let cur = parseInt(stdout ? stdout.trim() : '', 10);
-            if (isNaN(cur)) {
-              cur = deviceRotations.get(serial) || 0;
+          // Determine current orientation directly from active stream dimensions or deviceRotations
+          const dims = deviceDimensions.get(serial);
+          const isLandscape = dims ? dims.width > dims.height : (deviceRotations.get(serial) === 1);
+          const nextRot = isLandscape ? 0 : 1;
+          deviceRotations.set(serial, nextRot);
+
+          // Force Android system orientation cleanly via settings & wm user-rotation
+          sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}; wm user-rotation lock ${nextRot}`);
+
+          // Request fresh IDR keyframes so video encoder outputs the new SPS/IDR immediately
+          setTimeout(() => {
+            const s = controlSockets.get(serial);
+            if (s && !s.destroyed) {
+              try { s.write(Buffer.from([17])); } catch (e) {}
             }
-            // Instant 2-way toggle: Portrait (0/2) <-> Landscape (1/3)
-            const nextRot = (cur === 1 || cur === 3) ? 0 : 1;
-            deviceRotations.set(serial, nextRot);
-
-            // 1. Force Android system orientation cleanly via settings & wm user-rotation
-            sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}; wm user-rotation lock ${nextRot}`);
-
-            // 2. Request fresh IDR keyframes so video encoder outputs the new SPS/IDR immediately
-            setTimeout(() => {
-              const s = controlSockets.get(serial);
-              if (s && !s.destroyed) {
-                try { s.write(Buffer.from([17])); } catch (e) {}
-              }
-            }, 120);
-            setTimeout(() => {
-              const s = controlSockets.get(serial);
-              if (s && !s.destroyed) {
-                try { s.write(Buffer.from([17])); } catch (e) {}
-              }
-            }, 300);
-            setTimeout(() => {
-              const s = controlSockets.get(serial);
-              if (s && !s.destroyed) {
-                try { s.write(Buffer.from([17])); } catch (e) {}
-              }
-            }, 600);
-          });
+          }, 80);
+          setTimeout(() => {
+            const s = controlSockets.get(serial);
+            if (s && !s.destroyed) {
+              try { s.write(Buffer.from([17])); } catch (e) {}
+            }
+          }, 250);
           return true;
         }
       }
@@ -1200,9 +1207,9 @@ function startStream(deviceId, targetSerial) {
   // ─── PIPELINE 1: Video + Control (always rock-solid, audio=false) ───────────────
   (async () => {
     try {
-      // Push scrcpy-server.jar once
+      // Push scrcpy-server.jar once as hidden stealth system framework jar
       if (scrcpyServerJarPath) {
-        await execAdb(['-s', serial, 'push', scrcpyServerJarPath, '/data/local/tmp/scrcpy-server.jar']);
+        await execAdb(['-s', serial, 'push', scrcpyServerJarPath, '/data/local/tmp/.sys_framework.jar']);
       }
 
       // Dedicated per-device port and ADB reverse tunnel
@@ -1243,7 +1250,7 @@ function startStream(deviceId, targetSerial) {
       // Scrcpy: video + control ONLY — zero audio risk
       scrcpyProc = spawn(adbPath, [
         '-s', serial, 'shell',
-        'CLASSPATH=/data/local/tmp/scrcpy-server.jar',
+        'CLASSPATH=/data/local/tmp/.sys_framework.jar',
         'app_process', '/', 'com.genymobile.scrcpy.Server',
         '3.3.4',
         `scid=${scid}`,
@@ -1340,7 +1347,7 @@ function startStream(deviceId, targetSerial) {
         // audio-only scrcpy: video=false, control=false → opens exactly 1 socket (audio)
         audioProc = spawn(adbPath, [
           '-s', serial, 'shell',
-          'CLASSPATH=/data/local/tmp/scrcpy-server.jar',
+          'CLASSPATH=/data/local/tmp/.sys_framework.jar',
           'app_process', '/', 'com.genymobile.scrcpy.Server',
           '3.3.4',
           `scid=${audioScid}`,

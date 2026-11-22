@@ -363,6 +363,7 @@ export class SignalingServer {
             break;
           }
 
+          case 'resolution-change':
           case 'device-dimensions': {
             const { deviceId, width, height } = msg;
             const targetDevId = deviceId || session.deviceId;

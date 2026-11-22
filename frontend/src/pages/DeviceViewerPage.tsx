@@ -638,13 +638,12 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
               wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: reqId }));
               wsRef.current.send(JSON.stringify({ type: 'request-stream', deviceId: reqId }));
             }
-          } else if (msg.type === 'device-dimensions') {
+          } else if (msg.type === 'device-dimensions' || msg.type === 'resolution-change') {
             if (msg.width && msg.height) {
               const cur = activeStreamDimsRef.current;
               if (!cur || cur.width !== msg.width || cur.height !== msg.height) {
                 activeStreamDimsRef.current = { width: msg.width, height: msg.height };
                 setStreamDimensions({ width: msg.width, height: msg.height });
-                refreshStream();
               }
             }
           } else if (msg.type === 'device-offline') {
@@ -1544,12 +1543,6 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
           <button
             onClick={() => {
               sendInput('rotate');
-              // Instant optimistic aspect ratio flip for 0ms visual feedback
-              if (streamDimensions?.width && streamDimensions?.height) {
-                const flipped = { width: streamDimensions.height, height: streamDimensions.width };
-                activeStreamDimsRef.current = flipped;
-                setStreamDimensions(flipped);
-              }
             }}
             disabled={!canControl}
             className="p-2 md:p-2.5 rounded-xl hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 transition active:scale-90 active:bg-indigo-500/30"
