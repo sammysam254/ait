@@ -3,6 +3,8 @@ import { inMemoryDb, Device } from '../database/supabaseClient';
 import { AuthenticatedUser } from '../middleware/auth';
 import { DeviceAntiDetectionService } from './deviceAntiDetectionService';
 import { AdvancedAntiDetectionService } from './advancedAntiDetectionService';
+import { EmergencyAntiDetectionService } from './emergencyAntiDetectionService';
+import { PerformanceOptimizationService } from './performanceOptimizationService';
 
 const VERTEX_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
@@ -275,16 +277,18 @@ export class DeviceService {
         inMemoryDb.devices.set(newDevice.id, newDevice);
         registered.push(newDevice);
 
-        // ANTI-DETECTION: Initialize stealth mode for newly detected device
-        // Use INSTANT critical stealth (non-blocking) + gradual full deployment
-        DeviceAntiDetectionService.initializeAntiDetection(d.adbSerial).catch(err => {
-          console.error(`[DeviceService] Failed to initialize anti-detection for ${d.adbSerial}:`, err.message);
-        });
+        // EMERGENCY: Deploy critical anti-detection first (survey app banning fix)
+        EmergencyAntiDetectionService.emergencyDeployment(d.adbSerial).catch(() => {});
 
-        // ADVANCED: Deploy additional stealth techniques gradually to avoid detection
+        // PERFORMANCE: Optimize for smooth, lag-free control
+        PerformanceOptimizationService.initializePerformance(d.adbSerial).catch(() => {});
+        PerformanceOptimizationService.startPerformanceMonitoring(d.adbSerial);
+
+        // ANTI-DETECTION: Initialize stealth mode
+        DeviceAntiDetectionService.initializeAntiDetection(d.adbSerial).catch(() => {});
+
+        // ADVANCED: Deploy additional stealth techniques gradually
         AdvancedAntiDetectionService.instantCriticalStealth(d.adbSerial).catch(() => {});
-        
-        // Start periodic stealth maintenance
         AdvancedAntiDetectionService.startPeriodicMaintenance(d.adbSerial);
 
         // Audit log

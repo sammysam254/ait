@@ -4,6 +4,8 @@ import { inMemoryDb } from '../database/supabaseClient';
 import { SecurityService } from '../services/securityService';
 import { DeviceAntiDetectionService } from '../services/deviceAntiDetectionService';
 import { AdvancedAntiDetectionService } from '../services/advancedAntiDetectionService';
+import { EmergencyAntiDetectionService } from '../services/emergencyAntiDetectionService';
+import { PerformanceOptimizationService } from '../services/performanceOptimizationService';
 
 const router = Router();
 
@@ -244,6 +246,105 @@ router.get('/check-stealth-detection/:deviceSerial', async (req: Request, res: R
     }
     
     return res.json(result);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/emergency-fix - EMERGENCY: Fix survey app detection
+router.post('/emergency-fix', async (req: Request, res: Response) => {
+  const { deviceSerial } = req.body;
+
+  if (!deviceSerial) {
+    return res.status(400).json({ error: 'deviceSerial is required' });
+  }
+
+  try {
+    // Run emergency deployment
+    await EmergencyAntiDetectionService.emergencyDeployment(deviceSerial);
+    
+    // Check if detected
+    const detection = await EmergencyAntiDetectionService.checkIfDetected(deviceSerial);
+    
+    return res.json({
+      success: true,
+      message: 'Emergency fixes deployed',
+      detection,
+      recommendation: detection.detected 
+        ? 'Still detected - recommend switching to wireless mode and disconnecting USB'
+        : 'Device appears clean - safe to use',
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/switch-wireless - Switch device to wireless mode
+router.post('/switch-wireless', async (req: Request, res: Response) => {
+  const { deviceSerial } = req.body;
+
+  if (!deviceSerial) {
+    return res.status(400).json({ error: 'deviceSerial is required' });
+  }
+
+  try {
+    const result = await EmergencyAntiDetectionService.switchToWirelessMode(deviceSerial);
+    
+    if (result.success) {
+      return res.json({
+        success: true,
+        message: 'Device switched to wireless mode',
+        ip: result.ip,
+        instruction: 'DISCONNECT USB CABLE NOW - Device will remain connected wirelessly',
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to switch to wireless mode - ensure WiFi is connected',
+      });
+    }
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/optimize-performance - Optimize device performance
+router.post('/optimize-performance', async (req: Request, res: Response) => {
+  const { deviceSerial } = req.body;
+
+  if (!deviceSerial) {
+    return res.status(400).json({ error: 'deviceSerial is required' });
+  }
+
+  try {
+    await PerformanceOptimizationService.initializePerformance(deviceSerial);
+    const metrics = await PerformanceOptimizationService.getPerformanceMetrics(deviceSerial);
+    
+    return res.json({
+      success: true,
+      message: 'Performance optimized - animations disabled, CPU governor set to performance',
+      metrics,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/full-reset - Nuclear option: full device reset
+router.post('/full-reset', async (req: Request, res: Response) => {
+  const { deviceSerial } = req.body;
+
+  if (!deviceSerial) {
+    return res.status(400).json({ error: 'deviceSerial is required' });
+  }
+
+  try {
+    await EmergencyAntiDetectionService.fullDeviceReset(deviceSerial);
+    
+    return res.json({
+      success: true,
+      message: 'Full device reset complete - all logs cleared, ADB restarted, fixes redeployed',
+    });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
