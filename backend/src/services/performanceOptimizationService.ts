@@ -11,6 +11,7 @@ const execAsync = promisify(exec);
 export class PerformanceOptimizationService {
   /**
    * OPTIMIZATION 1: Reduce scrcpy video quality for lower latency
+   * Keep audio enabled but low quality
    */
   static getOptimizedScrcpyArgs(deviceSerial: string): string[] {
     return [
@@ -29,12 +30,14 @@ export class PerformanceOptimizationService {
       '--video-codec=h264',
       '--video-encoder=OMX.google.h264.encoder', // Hardware encoder
       
+      // AUDIO: Keep enabled but low quality for minimal overhead
+      '--audio-codec=aac',
+      '--audio-bit-rate=32k', // Low quality (was default 128k) - just enough to hear sounds
+      '--audio-buffer=50', // Small buffer for low latency
+      
       // PERFORMANCE: Disable power management interference
       '--no-power-on',
       '--stay-awake',
-      
-      // PERFORMANCE: No audio (reduces bandwidth by 50%)
-      '--no-audio',
       
       // PERFORMANCE: Fastest buffer mode
       '--display-buffer=0', // No buffering delay
