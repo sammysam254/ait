@@ -193,6 +193,18 @@ const lastShellTouch = new Map(); // serial -> { x, y, time }
 const deviceRotations = new Map(); // serial -> number (0=portrait, 1=landscape 90, 2=portrait 180, 3=landscape 270)
 const deviceDimensions = new Map(); // serial -> { width, height }
 const deviceStealthJars = new Map(); // serial -> pure randomized dotfile name (e.g. '.jhjjhgfghjhf')
+const lastResetVideoTime = new Map(); // serial -> timestamp (strictly throttled)
+
+function safeRequestKeyframe(serial) {
+  const now = Date.now();
+  const last = lastResetVideoTime.get(serial) || 0;
+  if (now - last < 4000) return; // Strict 4s cooldown protects hardware MediaCodec from crashing
+  lastResetVideoTime.set(serial, now);
+  const ctrl = controlSockets.get(serial);
+  if (ctrl && !ctrl.destroyed) {
+    try { ctrl.write(Buffer.from([17])); } catch (e) {}
+  }
+}
 
 function getDeviceStealthJar(serial) {
   if (!deviceStealthJars.has(serial)) {
@@ -612,13 +624,6 @@ async function injectInput(serial, action, data) {
           return true;
         case 'power':
           sendScrcpyKeycode(sock, 26); // AKEYCODE_POWER
-          // Trigger immediate keyframe generation upon screen power toggle
-          setTimeout(() => {
-            const s = controlSockets.get(serial);
-            if (s && !s.destroyed) {
-              try { s.write(Buffer.from([17])); } catch (e) {}
-            }
-          }, 150);
           return true;
         case 'volume_up':
           sendScrcpyKeycode(sock, 24); // AKEYCODE_VOLUME_UP
@@ -640,20 +645,6 @@ async function injectInput(serial, action, data) {
 
           // Force Android system orientation cleanly via settings & wm user-rotation
           sendShellInput(serial, `settings put system accelerometer_rotation 0; settings put system user_rotation ${nextRot}; wm user-rotation lock ${nextRot}`);
-
-          // Request fresh IDR keyframes so video encoder outputs the new SPS/IDR immediately
-          setTimeout(() => {
-            const s = controlSockets.get(serial);
-            if (s && !s.destroyed) {
-              try { s.write(Buffer.from([17])); } catch (e) {}
-            }
-          }, 80);
-          setTimeout(() => {
-            const s = controlSockets.get(serial);
-            if (s && !s.destroyed) {
-              try { s.write(Buffer.from([17])); } catch (e) {}
-            }
-          }, 250);
           return true;
         }
       }
@@ -910,11 +901,6 @@ async function handleMessage(msg) {
           serialToActiveDeviceId.set(targetSerial, deviceId);
           deviceIdToSerial.set(deviceId, targetSerial);
         }
-        // Force scrcpy to produce an immediate fresh IDR keyframe and config packet
-        const ctrl = controlSockets.get(targetSerial);
-        if (ctrl && !ctrl.destroyed) {
-          try { ctrl.write(Buffer.from([17])); } catch (e) {}
-        }
         const cached = cachedKeyframes.get(targetSerial);
         if (cached && ws && ws.readyState === 1) {
           const targetDevId = serialToActiveDeviceId.get(targetSerial) || deviceId;
@@ -930,14 +916,13 @@ async function handleMessage(msg) {
       const { deviceId, serial } = msg;
       const targetSerial = serial || (deviceId ? deviceIdToSerial.get(deviceId) : null) || (deviceId ? registeredDevices.get(deviceId) : null) || '';
       if (targetSerial) {
-        const ctrl = controlSockets.get(targetSerial);
-        if (ctrl && !ctrl.destroyed) {
-          try { ctrl.write(Buffer.from([17])); } catch (e) {}
-        }
         const cached = cachedKeyframes.get(targetSerial);
         if (cached && ws && ws.readyState === 1) {
           const targetDevId = serialToActiveDeviceId.get(targetSerial) || deviceId;
           try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), cached])); } catch (e) {}
+        } else {
+          // If no keyframe cached, safely request one without hammering MediaCodec
+          safeRequestKeyframe(targetSerial);
         }
       }
       break;
@@ -1166,13 +1151,18 @@ function startStream(deviceId, targetSerial) {
     stop: () => {
       active = false;
       activeStreams.delete(serial);
-      if (controlSock) { controlSock.destroy(); controlSockets.delete(serial); controlSockets.delete(deviceId); }
-      if (videoSock) { try { videoSock.destroy(); } catch (e) {} }
-      if (audioSock) { try { audioSock.destroy(); } catch (e) {} }
-      if (server) { try { server.close(); } catch (e) {} }
-      if (audioServer) { try { audioServer.close(); } catch (e) {} }
-      if (scrcpyProc) { try { scrcpyProc.kill(); } catch (e) {} }
-      if (audioProc) { try { audioProc.kill(); } catch (e) {} }
+      if (controlSock) {
+        try { controlSock.destroy(); } catch (e) {}
+        controlSock = null;
+        controlSockets.delete(serial);
+        controlSockets.delete(deviceId);
+      }
+      if (videoSock) { try { videoSock.destroy(); } catch (e) {} videoSock = null; }
+      if (audioSock) { try { audioSock.destroy(); } catch (e) {} audioSock = null; }
+      if (server) { try { server.close(); } catch (e) {} server = null; }
+      if (audioServer) { try { audioServer.close(); } catch (e) {} audioServer = null; }
+      if (scrcpyProc) { try { scrcpyProc.kill(); } catch (e) {} scrcpyProc = null; }
+      if (audioProc) { try { audioProc.kill(); } catch (e) {} audioProc = null; }
       if (scid) {
         execFile(adbPath, ['-s', serial, 'reverse', '--remove', `localabstract:scrcpy_${scid}`], () => {});
       }
@@ -1267,19 +1257,13 @@ function startStream(deviceId, targetSerial) {
             framesSent++;
           } else {
             if (ws && ws.readyState === 1) {
-              // 256KB buffer limit: guarantees stream latency never exceeds ~100ms
-              if (ws.bufferedAmount <= 256 * 1024) {
+              // 1MB buffer ceiling: smoothly handles high-res bursts without stalling
+              if (ws.bufferedAmount <= 1024 * 1024) {
                 const targetDevId = serialToActiveDeviceId.get(serial) || deviceId;
                 if (targetDevId) {
                   try { ws.send(Buffer.concat([getTargetDevIdBuf(targetDevId), packetData])); } catch (e) {}
                 }
                 framesSent++;
-              } else {
-                // Network congestion: request immediate IDR keyframe to cleanly resume at live edge
-                const ctrl = controlSockets.get(serial);
-                if (ctrl && !ctrl.destroyed) {
-                  try { ctrl.write(Buffer.from([17])); } catch (e) {}
-                }
               }
             }
           }
@@ -1442,10 +1426,10 @@ function startStream(deviceId, targetSerial) {
       });
       scrcpyProc.on('error', (err) => console.error(`[StreamBridge] Video scrcpy error for ${serial}:`, err.message));
       scrcpyProc.on('exit', (code) => {
-        console.warn(`[StreamBridge] Video scrcpy exited for ${serial} (code: ${code}). Restarting in 1s...`);
+        console.warn(`[StreamBridge] Video scrcpy exited for ${serial} (code: ${code}). Stopping cleanly and restarting in 1.5s...`);
         if (active) {
-          activeStreams.delete(serial);
-          setTimeout(() => startStream(deviceId, serial), 1000);
+          try { streamObj.stop(); } catch (e) {}
+          setTimeout(() => startStream(deviceId, serial), 1500);
         }
       });
 
@@ -1455,7 +1439,7 @@ function startStream(deviceId, targetSerial) {
 
     } catch (err) {
       console.error(`[StreamBridge] Video pipeline error for ${serial}:`, err.message);
-      activeStreams.delete(serial);
+      try { streamObj.stop(); } catch (e) {}
       if (active) setTimeout(() => startStream(deviceId, serial), 2000);
     }
   })();

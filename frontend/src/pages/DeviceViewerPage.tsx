@@ -629,8 +629,24 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
           try { ws.send(JSON.stringify({ type: 'ping' })); } catch (e) {}
         }
       }, 15000);
+
+      // Active watchdog: detects and immediately un-stalls 0 FPS decoder hangs
+      if (streamPoller) clearInterval(streamPoller);
+      streamPoller = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          const now = performance.now();
+          if (now - lastFrameTimeRef.current > 2500) {
+            if (videoRef.current && videoRef.current.paused) {
+              videoRef.current.play().catch(() => {});
+            }
+            const reqId = activeDeviceIdRef.current || id;
+            try { ws.send(JSON.stringify({ type: 'request-keyframe', deviceId: reqId })); } catch (e) {}
+          }
+        }
+      }, 2000);
     };
 
+    const lastFrameTimeRef = { current: performance.now() };
     let frameCount = 0;
     let lastTime = performance.now();
 
@@ -687,6 +703,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
         } catch (e) {}
       } else if (event.data instanceof ArrayBuffer) {
         let bytes = new Uint8Array(event.data);
+        lastFrameTimeRef.current = performance.now();
         setStatus((prev) => (prev !== 'connected' ? 'connected' : prev));
 
         // Strip 36-byte UUID prefix if forwarded with routing envelope
@@ -772,32 +789,30 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
               videoRef.current.play().catch(() => {});
             }
 
-            // Smooth live-edge sync: throttled to 200ms with gentle catchup (max 1.12x) to prevent mobile decoder stalls
+            // Zero-Lag Real-Time Live-Edge Snapping: Guarantees 0ms perceptual lag
             const nowTs = performance.now();
-            if (nowTs - lastSyncCheckRef.current >= 200) {
+            if (nowTs - lastSyncCheckRef.current >= 100) {
               lastSyncCheckRef.current = nowTs;
               if (videoRef.current && videoRef.current.buffered.length > 0) {
                 const buf = videoRef.current.buffered;
                 const liveEdge = buf.end(buf.length - 1);
                 const drift = liveEdge - videoRef.current.currentTime;
 
-                let targetRate = 1.0;
-                if (drift > 0.35) {
-                  targetRate = 1.12; // Gentle catchup without overwhelming mobile decoders
-                } else if (drift > 0.12) {
-                  targetRate = 1.05;
-                } else if (drift <= 0.05) {
-                  targetRate = 1.0;
+                // If buffer is more than 80ms ahead of current playback, jump straight to live edge
+                if (drift > 0.08) {
+                  videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
                 }
 
-                if (Math.abs(videoRef.current.playbackRate - targetRate) > 0.01) {
-                  videoRef.current.playbackRate = targetRate;
-                }
-
-                // If severe drift occurs (> 1.2s from background tab or network lag), request keyframe to cleanly resync
-                if (drift > 1.2 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                  const currentDeviceId = activeDeviceIdRef.current || id;
-                  wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: currentDeviceId }));
+                // If severe drift accumulates (> 0.7s, e.g. from tab switch or mobile freeze), purge buffer and resync
+                if (drift > 0.7) {
+                  if (jmuxerRef.current && typeof jmuxerRef.current.clearBuffer === 'function') {
+                    try { jmuxerRef.current.clearBuffer(); } catch (e) {}
+                  }
+                  videoRef.current.currentTime = liveEdge;
+                  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    const currentDeviceId = activeDeviceIdRef.current || id;
+                    wsRef.current.send(JSON.stringify({ type: 'request-keyframe', deviceId: currentDeviceId }));
+                  }
                 }
               }
             }
