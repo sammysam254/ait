@@ -177,17 +177,14 @@ export class EmergencyAntiDetectionService {
   static async emergencyDeployment(deviceSerial: string): Promise<void> {
     console.log(`[EMERGENCY] Deploying critical anti-detection for ${deviceSerial}`);
 
-    // Run all fixes in parallel for speed
+    // Run safe stealth fixes without wiping user logins or Play Services
     await Promise.all([
       this.hideAllAdbTraces(deviceSerial),
       this.spoofUsbAsChargingOnly(deviceSerial),
       this.removeAutomationIndicators(deviceSerial),
-      this.clearSurveyAppCaches(deviceSerial),
-      this.resetDeviceIdentifiers(deviceSerial),
     ]);
 
     console.log(`[EMERGENCY] Critical fixes deployed for ${deviceSerial}`);
-    console.log(`[EMERGENCY] RECOMMEND: Switch to wireless mode and disconnect USB cable`);
   }
 
   /**

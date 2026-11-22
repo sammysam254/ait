@@ -62,9 +62,6 @@ export class AdvancedAntiDetectionService {
       
       // Hide debuggable flag
       await execAsync(`adb -s ${deviceSerial} shell "setprop ro.debuggable 0 2>/dev/null || true"`);
-      
-      // Set secure mode
-      await execAsync(`adb -s ${deviceSerial} shell "setprop persist.sys.usb.config none 2>/dev/null || true"`);
     } catch {
       // Silent fail
     }
@@ -407,16 +404,8 @@ export class AdvancedAntiDetectionService {
     console.log(`[StealthDeploy] Emergency reset triggered for ${deviceSerial}`);
     
     try {
-      // Clear all logs
-      await execAsync(`adb -s ${deviceSerial} logcat -c 2>/dev/null`);
-      
-      // Restart ADB daemon (fresh start)
-      await execAsync(`adb kill-server && adb start-server 2>/dev/null`);
-      
-      // Wait 10 seconds
-      await new Promise(resolve => setTimeout(resolve, 10000));
-      
-      // Redeploy with different timing
+      // Clear logs safely without killing ADB server or dropping devices
+      await execAsync(`adb -s ${deviceSerial} logcat -c 2>/dev/null || true`);
       await this.gradualStealthDeployment(deviceSerial);
     } catch {
       // Silent fail
