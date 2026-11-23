@@ -220,12 +220,14 @@ export const SettingsPage: React.FC = () => {
     try {
       const res = await ApiService.buyDomain(buyDomainName.trim(), 1);
       const cleanTarget = buyDomainName.trim().toLowerCase();
+      const targetUrl = res.redirectUrl || `https://dash.cloudflare.com/domains/register?search=${encodeURIComponent(cleanTarget)}`;
       setActivePurchaseDomain(cleanTarget);
       setActiveStateToken(res.stateToken || '');
-      setPurchaseUrl(res.redirectUrl || `https://dash.cloudflare.com/domains/register?search=${encodeURIComponent(cleanTarget)}`);
+      setPurchaseUrl(targetUrl);
       setPurchaseSuccess(false);
       setPollCount(0);
       setPurchaseModalOpen(true);
+      window.open(targetUrl, 'cf_checkout', 'width=1020,height=760,scrollbars=yes,resizable=yes');
     } catch (e: any) {
       setDomainActionError(e.message || 'Failed to initiate domain purchase');
     } finally {
@@ -809,9 +811,14 @@ export const SettingsPage: React.FC = () => {
                         </p>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-2">
-                        <AlertCircle className="h-3.5 w-3.5" />
-                        <span>Domain is not available for registration.</span>
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2 font-semibold">
+                          <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
+                          <span className="text-white">Domain is already registered!</span>
+                        </div>
+                        <p className="text-[11px] text-gray-300 leading-relaxed">
+                          {(buyAvailability as any).message || 'This domain is already owned. If you own it, connect it below using "Cloudflare Auto-Connect" or "Transfer Existing Domain to Cloudflare".'}
+                        </p>
                       </div>
                     )}
                   </div>
@@ -1003,8 +1010,8 @@ export const SettingsPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Modal Body / Embedded Iframe */}
-            <div className="flex-1 bg-gray-900 relative overflow-hidden">
+            {/* Modal Body / Dedicated In-App Monitor */}
+            <div className="flex-1 bg-gray-950 p-6 flex flex-col items-center justify-center text-center space-y-6 relative overflow-hidden">
               {purchaseSuccess ? (
                 <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4">
                   <div className="w-16 h-16 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center animate-bounce">
@@ -1020,12 +1027,52 @@ export const SettingsPage: React.FC = () => {
                   </span>
                 </div>
               ) : (
-                <iframe
-                  src={purchaseUrl}
-                  title="Cloudflare Registrar"
-                  className="w-full h-full border-0 bg-white"
-                  sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
-                />
+                <div className="max-w-md space-y-5">
+                  <div className="relative mx-auto w-20 h-20 flex items-center justify-center">
+                    <div className="absolute inset-0 rounded-full bg-cyan-500/20 animate-ping" />
+                    <div className="relative w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center">
+                      <ShoppingCart className="h-8 w-8 text-cyan-400" />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <h4 className="text-lg font-bold text-white">
+                      Cloudflare Checkout Window Active
+                    </h4>
+                    <p className="text-xs text-gray-300 leading-relaxed">
+                      Complete your domain registration for <span className="font-bold text-white font-mono">{activePurchaseDomain}</span> in the Cloudflare window.
+                      Cloudflare securely handles your payment method.
+                    </p>
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-gray-900 border border-gray-800 text-left space-y-2 text-xs">
+                    <div className="flex items-center gap-2 text-emerald-400 font-semibold">
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      <span>Vertex Automated DNS Routing</span>
+                    </div>
+                    <p className="text-[11px] text-gray-400 leading-relaxed">
+                      You don't need to configure any DNS records manually. As soon as payment completes on Cloudflare, our automated watcher will detect your new zone, create the CNAME record, and activate your dashboard!
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-center gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => window.open(purchaseUrl, 'cf_checkout', 'width=1020,height=760,scrollbars=yes,resizable=yes')}
+                      className="px-4 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs flex items-center gap-2 transition shadow-lg shadow-cyan-600/20"
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                      <span>Re-Open Cloudflare Window</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseModalOpen(false)}
+                      className="px-4 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 font-semibold text-xs transition"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
 

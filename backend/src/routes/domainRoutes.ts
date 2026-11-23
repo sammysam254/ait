@@ -185,43 +185,59 @@ router.post('/provision-subdomain', authenticate, async (req: Request, res: Resp
   }
 });
 
-// GET /api/domains/check-availability - Check domain availability via Cloudflare Registrar
+// GET /api/domains/check-availability - Check domain availability via authoritative DNS & Cloudflare
 router.get('/check-availability', authenticate, async (req: Request, res: Response) => {
   const domain = ((req.query.domain as string) || '').toLowerCase().trim();
   if (!domain) return res.status(400).json({ error: 'Domain name is required.' });
 
   const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '';
-  const CF_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN || '';
 
   try {
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/registrar/domains/${encodeURIComponent(domain)}`,
-      { headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' } }
-    );
-    const data: any = await response.json();
-    // If Cloudflare returns a result for a registered domain it means NOT available for purchase
-    // Availability check: use the registrar search endpoint
-    const checkResp = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/registrar/domains?name=${encodeURIComponent(domain)}`,
-      { headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' } }
-    );
-    const checkData: any = await checkResp.json();
-    const price = data.result?.current_price || checkData.result?.[0]?.current_price || 14.99;
-    const available = !data.success || !data.result?.registered;
+    // 1. Check if domain already exists in Cloudflare zones
+    const zoneMatch = await findCloudflareZoneForDomain(domain);
+    if (zoneMatch) {
+      return res.json({
+        available: false,
+        registered: true,
+        alreadyInCloudflare: true,
+        domain,
+        message: `This domain is already in your Cloudflare account! You can link it instantly using "Cloudflare Auto-Connect".`,
+      });
+    }
+
+    // 2. Query authoritative DNS over HTTPS (Cloudflare 1.1.1.1) for NS & SOA records
+    const nsResp = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=NS`, {
+      headers: { 'Accept': 'application/dns-json' },
+    });
+    const nsData: any = await nsResp.json();
+    const hasNs = nsData.Status === 0 && Array.isArray(nsData.Answer) && nsData.Answer.length > 0;
+
+    const soaResp = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=SOA`, {
+      headers: { 'Accept': 'application/dns-json' },
+    });
+    const soaData: any = await soaResp.json();
+    const hasSoa = soaData.Status === 0 && Array.isArray(soaData.Answer) && soaData.Answer.length > 0;
+
+    const isRegistered = hasNs || hasSoa;
+
+    if (isRegistered) {
+      return res.json({
+        available: false,
+        registered: true,
+        domain,
+        message: `Domain ${domain} is already registered. If you own it, you can transfer it to Cloudflare or use Cloudflare Auto-Connect.`,
+      });
+    }
+
     return res.json({
-      available,
-      price,
+      available: true,
+      registered: false,
+      price: 14.99,
       domain,
       redirectUrl: `https://dash.cloudflare.com/${CF_ACCOUNT_ID}/domains/register?search=${encodeURIComponent(domain)}`,
     });
   } catch (err: any) {
-    // Fallback: assume available if CF API errors (e.g. registrar access not enabled)
-    return res.json({
-      available: true,
-      price: 14.99,
-      domain,
-      redirectUrl: `https://www.cloudflare.com/products/registrar/?utm_source=vertex&search=${encodeURIComponent(domain)}`,
-    });
+    return res.status(500).json({ error: err.message || 'Failed to check domain availability' });
   }
 });
 
