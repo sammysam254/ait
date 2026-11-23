@@ -170,6 +170,7 @@ export interface OrganizationDomain {
   status: 'pending_verification' | 'active' | 'failed' | 'removed';
   cf_zone_id?: string;        // Cloudflare zone ID if domain lives in Sammy's CF account
   cf_dns_record_id?: string;  // DNS record ID we created
+  nameservers?: string[];     // Cloudflare nameservers if transferring domain to Cloudflare
   verification_token?: string; // TXT record value for external domain ownership verification
   ssl_status: 'pending' | 'active' | 'failed';
   added_by: string;           // user_id

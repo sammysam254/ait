@@ -630,6 +630,28 @@ export class ApiService {
     });
   }
 
+  /** Called after returning from or during Cloudflare Registrar — polls for new zone and auto-activates */
+  static async pollPurchase(domain: string, stateToken?: string, customToken?: string): Promise<any> {
+    return await this.request<any>('/domains/poll-purchase', {
+      method: 'POST',
+      body: JSON.stringify({ stateToken, domain, customToken }),
+    });
+  }
+
+  static async transferCloudflareDomain(domain: string, customToken?: string): Promise<any> {
+    return await this.request<any>('/domains/transfer-cloudflare', {
+      method: 'POST',
+      body: JSON.stringify({ domain, customToken }),
+    });
+  }
+
+  static async checkTransferStatus(domainId: string, customToken?: string): Promise<any> {
+    return await this.request<any>(`/domains/${domainId}/check-transfer`, {
+      method: 'POST',
+      body: JSON.stringify({ customToken }),
+    });
+  }
+
   static async addExternalDomain(domain: string): Promise<any> {
     return await this.request<any>('/domains/external', {
       method: 'POST',

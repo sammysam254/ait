@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Settings,
   Shield,
@@ -16,6 +16,9 @@ import {
   Copy,
   Check,
   Server,
+  X,
+  ArrowRight,
+  Loader2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { ApiService } from '../services/api';
@@ -52,6 +55,21 @@ export const SettingsPage: React.FC = () => {
   const [buyAvailability, setBuyAvailability] = useState<{ available: boolean; price?: number; redirectUrl?: string } | null>(null);
   const [buyingDomain, setBuyingDomain] = useState(false);
 
+  // In-App Cloudflare Purchase Modal State
+  const [purchaseModalOpen, setPurchaseModalOpen] = useState(false);
+  const [purchaseUrl, setPurchaseUrl] = useState('');
+  const [activePurchaseDomain, setActivePurchaseDomain] = useState('');
+  const [activeStateToken, setActiveStateToken] = useState('');
+  const [purchaseSuccess, setPurchaseSuccess] = useState(false);
+  const [pollCount, setPollCount] = useState(0);
+
+  // Transfer Domain to Cloudflare State
+  const [transferDomainName, setTransferDomainName] = useState('');
+  const [transferringDomain, setTransferringDomain] = useState(false);
+  const [transferInstructions, setTransferInstructions] = useState<{ domain: string; nameservers: string[] } | null>(null);
+  const [verifyingTransferId, setVerifyingTransferId] = useState<string | null>(null);
+  const [copiedNsIndex, setCopiedNsIndex] = useState<number | null>(null);
+
   // Free Subdomain State
   const [subdomainPrefix, setSubdomainPrefix] = useState('');
   const [provisioningSubdomain, setProvisioningSubdomain] = useState(false);
@@ -78,6 +96,37 @@ export const SettingsPage: React.FC = () => {
   useEffect(() => {
     fetchDomains();
   }, []);
+
+  // In-App Purchase Polling Effect
+  useEffect(() => {
+    let timer: any = null;
+    if (purchaseModalOpen && activePurchaseDomain && !purchaseSuccess) {
+      timer = setInterval(async () => {
+        setPollCount((prev) => prev + 1);
+        try {
+          const token = useOwnCf ? customCfToken.trim() : undefined;
+          const res = await ApiService.pollPurchase(activePurchaseDomain, activeStateToken, token);
+          if (res.success || res.alreadyActive) {
+            setPurchaseSuccess(true);
+            setDomainActionSuccess(`🎉 Domain ${activePurchaseDomain} purchased and connected to your dashboard!`);
+            await fetchDomains();
+            setTimeout(() => {
+              setPurchaseModalOpen(false);
+              setPurchaseSuccess(false);
+              setActivePurchaseDomain('');
+              setBuyAvailability(null);
+              setBuyDomainName('');
+            }, 3000);
+          }
+        } catch (e) {
+          // Keep polling until user closes or payment finishes
+        }
+      }, 3500);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [purchaseModalOpen, activePurchaseDomain, activeStateToken, purchaseSuccess, useOwnCf, customCfToken]);
 
   // Search Cloudflare Zones
   const handleSearchCloudflare = async () => {
@@ -170,18 +219,66 @@ export const SettingsPage: React.FC = () => {
 
     try {
       const res = await ApiService.buyDomain(buyDomainName.trim(), 1);
-      if (res.redirectUrl) {
-        window.open(res.redirectUrl, '_blank', 'noopener,noreferrer');
-        setDomainActionSuccess(res.message || 'Opening Cloudflare to complete your purchase...');
+      const cleanTarget = buyDomainName.trim().toLowerCase();
+      setActivePurchaseDomain(cleanTarget);
+      setActiveStateToken(res.stateToken || '');
+      setPurchaseUrl(res.redirectUrl || `https://dash.cloudflare.com/domains/register?search=${encodeURIComponent(cleanTarget)}`);
+      setPurchaseSuccess(false);
+      setPollCount(0);
+      setPurchaseModalOpen(true);
+    } catch (e: any) {
+      setDomainActionError(e.message || 'Failed to initiate domain purchase');
+    } finally {
+      setBuyingDomain(false);
+    }
+  };
+
+  // Transfer Existing Domain to Cloudflare
+  const handleTransferToCloudflare = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!transferDomainName.trim()) return;
+
+    setTransferringDomain(true);
+    setDomainActionError(null);
+    setDomainActionSuccess(null);
+
+    const token = useOwnCf ? customCfToken.trim() : undefined;
+    try {
+      const res = await ApiService.transferCloudflareDomain(transferDomainName.trim(), token);
+      if (res.alreadyInCloudflare) {
+        setDomainActionSuccess(res.message || `🎉 ${transferDomainName} was already in Cloudflare and is now active on your dashboard!`);
+        setTransferInstructions(null);
       } else {
-        setDomainActionSuccess(res.message || `Domain ${buyDomainName} registered!`);
-        setBuyDomainName('');
+        setTransferInstructions({ domain: transferDomainName.trim(), nameservers: res.nameservers || [] });
+        setDomainActionSuccess(res.message || 'Zone created in Cloudflare! Update nameservers at your registrar.');
+      }
+      setTransferDomainName('');
+      await fetchDomains();
+    } catch (e: any) {
+      setDomainActionError(e.message || 'Failed to initiate domain transfer to Cloudflare');
+    } finally {
+      setTransferringDomain(false);
+    }
+  };
+
+  // Verify Cloudflare Nameservers
+  const handleCheckTransfer = async (domainId: string) => {
+    setVerifyingTransferId(domainId);
+    setDomainActionError(null);
+    setDomainActionSuccess(null);
+
+    const token = useOwnCf ? customCfToken.trim() : undefined;
+    try {
+      const res = await ApiService.checkTransferStatus(domainId, token);
+      if (res.activated) {
+        setDomainActionSuccess('🎉 Nameservers verified! Domain is active and routed to your dashboard.');
+        setTransferInstructions(null);
         await fetchDomains();
       }
     } catch (e: any) {
-      setDomainActionError(e.message || 'Failed to purchase domain');
+      setDomainActionError(e.message || 'Nameserver change not yet detected. Please allow 5-30 minutes for propagation.');
     } finally {
-      setBuyingDomain(false);
+      setVerifyingTransferId(null);
     }
   };
 
@@ -379,10 +476,24 @@ export const SettingsPage: React.FC = () => {
                         Target: <span className="font-mono text-gray-300">app.vertext.online</span> • Added on{' '}
                         {new Date(d.created_at).toLocaleDateString()}
                       </p>
+                      {d.nameservers && d.nameservers.length > 0 && d.status === 'pending_verification' && (
+                        <p className="text-[11px] text-cyan-300 font-mono">
+                          Required Nameservers: {d.nameservers.join(', ')}
+                        </p>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2">
-                      {d.status === 'pending_verification' && (
+                      {d.status === 'pending_verification' && d.nameservers && d.nameservers.length > 0 ? (
+                        <button
+                          onClick={() => handleCheckTransfer(d.id)}
+                          disabled={verifyingTransferId === d.id}
+                          className="px-3 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 text-xs font-semibold flex items-center gap-1.5 transition"
+                        >
+                          <RefreshCw className={`h-3 w-3 ${verifyingTransferId === d.id ? 'animate-spin' : ''}`} />
+                          <span>Verify Nameservers</span>
+                        </button>
+                      ) : d.status === 'pending_verification' ? (
                         <button
                           onClick={() => handleVerifyExternal(d.id)}
                           disabled={verifyingId === d.id}
@@ -391,7 +502,7 @@ export const SettingsPage: React.FC = () => {
                           <RefreshCw className={`h-3 w-3 ${verifyingId === d.id ? 'animate-spin' : ''}`} />
                           <span>Verify DNS</span>
                         </button>
-                      )}
+                      ) : null}
 
                       <a
                         href={`https://${d.domain}`}
@@ -452,6 +563,44 @@ export const SettingsPage: React.FC = () => {
                   </button>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Cloudflare Nameserver Transfer Instructions Box if generated */}
+          {transferInstructions && (
+            <div className="p-5 rounded-2xl bg-cyan-950/40 border border-cyan-500/30 text-xs space-y-3">
+              <div className="flex items-center gap-2 text-cyan-300 font-bold text-sm">
+                <Globe className="h-4 w-4" />
+                <span>Cloudflare Nameserver Transfer for {transferInstructions.domain}</span>
+              </div>
+              <p className="text-gray-300 text-[11px]">
+                We have registered your domain's zone in Cloudflare and pre-routed the CNAME to your Vertex dashboard!
+                Log in to your domain registrar (GoDaddy, Namecheap, Google Domains, etc.) and update your nameservers to:
+              </p>
+              <div className="space-y-2 font-mono text-[11px]">
+                {transferInstructions.nameservers.map((ns, idx) => (
+                  <div key={ns} className="p-2.5 rounded-lg bg-gray-950 border border-gray-800 flex items-center justify-between">
+                    <div>
+                      <span className="text-gray-500">Nameserver {idx + 1}: </span>
+                      <span className="text-cyan-400 font-bold">{ns}</span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(ns);
+                        setCopiedNsIndex(idx);
+                        setTimeout(() => setCopiedNsIndex(null), 2000);
+                      }}
+                      className="p-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 flex items-center gap-1 text-[10px]"
+                    >
+                      {copiedNsIndex === idx ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                      <span>{copiedNsIndex === idx ? 'Copied' : 'Copy'}</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] text-gray-400">
+                ⚡ As soon as nameservers update, Cloudflare will automatically route this domain directly to your organization dashboard!
+              </p>
             </div>
           )}
 
@@ -613,9 +762,8 @@ export const SettingsPage: React.FC = () => {
                   <h4 className="text-sm font-bold text-white">Buy & Auto-Link Domain</h4>
                 </div>
                 <p className="text-[11px] text-gray-400">
-                  Check availability and purchase through Cloudflare Registrar. After purchase, Cloudflare automatically routes DNS
-                  — then come back and use <span className="text-amber-400 font-semibold">Cloudflare Auto-Connect</span> to link
-                  it to your dashboard in one click.
+                  Search domain availability and checkout directly with Cloudflare inside Vertex. Payment is handled by Cloudflare,
+                  and Vertex automatically provisions DNS and routes your dashboard the second payment is verified!
                 </p>
               </div>
 
@@ -651,13 +799,13 @@ export const SettingsPage: React.FC = () => {
                           type="button"
                           onClick={handleBuyDomain}
                           disabled={buyingDomain}
-                          className="w-full py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+                          className="w-full py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition disabled:opacity-50 shadow-lg shadow-cyan-600/20"
                         >
-                          <ExternalLink className="h-3.5 w-3.5" />
-                          <span>{buyingDomain ? 'Opening Cloudflare...' : 'Buy on Cloudflare Registrar →'}</span>
+                          <ShoppingCart className="h-3.5 w-3.5" />
+                          <span>{buyingDomain ? 'Opening Cloudflare Checkout...' : 'Buy on Cloudflare (In-App Checkout) →'}</span>
                         </button>
                         <p className="text-[10px] text-gray-500 text-center">
-                          Payment handled securely by Cloudflare. After purchase, return here and use Cloudflare Auto-Connect.
+                          ⚡ Payment opens directly in Vertex. Our system auto-polls Cloudflare and connects DNS automatically.
                         </p>
                       </div>
                     ) : (
@@ -671,36 +819,61 @@ export const SettingsPage: React.FC = () => {
               </form>
             </div>
 
-            {/* METHOD 4: Add External Domain (Third-Party Registrar) */}
+            {/* METHOD 4: Transfer Registered Domain to Cloudflare DNS */}
             <div className="rounded-2xl bg-gray-900/80 border border-gray-800 p-6 space-y-4 shadow-xl">
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <Server className="h-4 w-4 text-purple-400" />
-                  <h4 className="text-sm font-bold text-white">External Domain (GoDaddy, Namecheap)</h4>
+                  <h4 className="text-sm font-bold text-white">Transfer Existing Domain to Cloudflare</h4>
                 </div>
                 <p className="text-[11px] text-gray-400">
-                  Connect any domain registered with an external registrar by setting up CNAME and TXT records.
+                  Already own a domain at GoDaddy, Namecheap, etc.? Enter it here — Vertex will create the Cloudflare zone,
+                  pre-configure DNS CNAME, and give you nameservers to add at your registrar for 100% automated routing!
                 </p>
               </div>
 
-              <form onSubmit={handleAddExternal} className="space-y-3">
+              <form onSubmit={handleTransferToCloudflare} className="space-y-3">
                 <input
                   type="text"
                   required
-                  placeholder="e.g. portal.myclient.com"
-                  value={externalDomainName}
-                  onChange={(e) => setExternalDomainName(e.target.value)}
+                  placeholder="e.g. mybrand.com or portal.mybrand.com"
+                  value={transferDomainName}
+                  onChange={(e) => setTransferDomainName(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl bg-gray-950 border border-gray-800 text-white text-xs focus:outline-none focus:border-purple-500"
                 />
 
                 <button
                   type="submit"
-                  disabled={addingExternal || !externalDomainName}
-                  className="w-full py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-lg shadow-purple-600/20 transition disabled:opacity-50"
+                  disabled={transferringDomain || !transferDomainName}
+                  className="w-full py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-lg shadow-purple-600/20 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
                 >
-                  {addingExternal ? 'Adding Domain...' : 'Generate DNS Records'}
+                  <Globe className="h-3.5 w-3.5" />
+                  <span>{transferringDomain ? 'Configuring Cloudflare Zone...' : 'Transfer DNS to Cloudflare'}</span>
                 </button>
               </form>
+
+              {/* Or manual DNS toggle */}
+              <div className="pt-2 border-t border-gray-800/60">
+                <details className="text-[11px] text-gray-400 cursor-pointer">
+                  <summary className="hover:text-gray-200">Or use manual DNS CNAME / TXT (Without changing nameservers)</summary>
+                  <form onSubmit={handleAddExternal} className="mt-3 space-y-2">
+                    <input
+                      type="text"
+                      placeholder="e.g. portal.myclient.com"
+                      value={externalDomainName}
+                      onChange={(e) => setExternalDomainName(e.target.value)}
+                      className="w-full px-3 py-1.5 rounded-lg bg-gray-950 border border-gray-800 text-white text-xs focus:outline-none focus:border-gray-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={addingExternal || !externalDomainName}
+                      className="w-full py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 font-semibold text-xs transition disabled:opacity-50"
+                    >
+                      {addingExternal ? 'Generating...' : 'Generate Manual Records'}
+                    </button>
+                  </form>
+                </details>
+              </div>
             </div>
           </div>
         </div>
@@ -785,6 +958,104 @@ export const SettingsPage: React.FC = () => {
                 <span>Device Sharing PIN Encryption</span>
                 <span className="text-emerald-400 font-semibold">bcrypt (10 rounds)</span>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* IN-APP CLOUDFLARE PURCHASE MODAL */}
+      {purchaseModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-200">
+          <div className="bg-gray-950 border border-gray-800 rounded-2xl w-full max-w-4xl h-[88vh] flex flex-col shadow-2xl overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-4 border-b border-gray-800 flex items-center justify-between bg-gray-900/90">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-cyan-500/20 border border-cyan-500/30 flex items-center justify-center">
+                  <Globe className="h-4 w-4 text-cyan-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-white text-sm">Cloudflare Registrar Checkout</span>
+                    <span className="px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 text-[10px] font-mono font-bold">
+                      {activePurchaseDomain}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-gray-400">Complete domain purchase directly with Cloudflare</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={purchaseUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-2.5 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs flex items-center gap-1.5 transition"
+                  title="Open in external browser window"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Open in Popup</span>
+                </a>
+                <button
+                  onClick={() => setPurchaseModalOpen(false)}
+                  className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body / Embedded Iframe */}
+            <div className="flex-1 bg-gray-900 relative overflow-hidden">
+              {purchaseSuccess ? (
+                <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4">
+                  <div className="w-16 h-16 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center animate-bounce">
+                    <CheckCircle2 className="h-8 w-8 text-emerald-400" />
+                  </div>
+                  <h4 className="text-xl font-bold text-white">Payment & Domain Verified!</h4>
+                  <p className="text-sm text-gray-300 max-w-md">
+                    <span className="font-bold text-white">{activePurchaseDomain}</span> has been registered and Cloudflare DNS
+                    was automatically configured to route directly to your dashboard!
+                  </p>
+                  <span className="text-xs text-emerald-400 animate-pulse font-semibold">
+                    Returning to settings in 3 seconds...
+                  </span>
+                </div>
+              ) : (
+                <iframe
+                  src={purchaseUrl}
+                  title="Cloudflare Registrar"
+                  className="w-full h-full border-0 bg-white"
+                  sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
+                />
+              )}
+            </div>
+
+            {/* Modal Footer / Live Polling Watcher */}
+            <div className="p-3.5 border-t border-gray-800 bg-gray-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2.5">
+                <Loader2 className="h-4 w-4 text-cyan-400 animate-spin shrink-0" />
+                <div>
+                  <span className="text-gray-200 font-semibold">Auto-Detecting Cloudflare Payment</span>
+                  <span className="text-gray-500 text-[11px] block">
+                    Checked {pollCount} time{pollCount === 1 ? '' : 's'} • Vertex automatically creates DNS records the instant Cloudflare approves payment.
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  const token = useOwnCf ? customCfToken.trim() : undefined;
+                  const res = await ApiService.pollPurchase(activePurchaseDomain, activeStateToken, token);
+                  if (res.success || res.alreadyActive) {
+                    setPurchaseSuccess(true);
+                    setDomainActionSuccess(`🎉 Domain ${activePurchaseDomain} connected to your dashboard!`);
+                    await fetchDomains();
+                  } else {
+                    setDomainActionError(res.message || 'Payment not yet confirmed by Cloudflare. Please complete checkout.');
+                  }
+                }}
+                className="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition shrink-0 self-end sm:self-auto"
+              >
+                Check Now
+              </button>
             </div>
           </div>
         </div>

@@ -317,6 +317,174 @@ export async function verifyExternalDomain(domainId: string): Promise<{ verified
   }
 }
 
+/**
+ * FLOW C: Transfer existing registered domain to Cloudflare DNS
+ * Creates a Cloudflare zone for the apex domain, pre-provisions the CNAME to app.vertext.online,
+ * and returns the 2 Cloudflare nameservers for the user to point to at their registrar.
+ */
+export async function createCloudflareZoneForTransfer(
+  organizationId: string,
+  userId: string,
+  domain: string,
+  customToken?: string,
+): Promise<{ domain: OrganizationDomain; nameservers: string[]; alreadyInCloudflare: boolean }> {
+  const tokenToUse = customToken || CF_TOKEN;
+  const cleanDomain = domain.toLowerCase().trim();
+
+  // Extract apex domain (e.g. "sub.example.com" -> "example.com")
+  const parts = cleanDomain.split('.');
+  const apexDomain = parts.length > 2 ? parts.slice(-2).join('.') : cleanDomain;
+
+  // 1. Check if zone already exists in Cloudflare
+  const existingZone = await findCloudflareZoneForDomain(apexDomain, tokenToUse);
+  if (existingZone) {
+    // Zone is already present in Cloudflare! Auto-connect immediately
+    const record = await connectCloudflareZoneDomain(
+      organizationId,
+      userId,
+      cleanDomain,
+      existingZone.id,
+      tokenToUse
+    );
+    return { domain: record, nameservers: [], alreadyInCloudflare: true };
+  }
+
+  // 2. Zone does not exist in Cloudflare yet — create it
+  if (!tokenToUse) {
+    throw new Error('No Cloudflare credentials available to create zone.');
+  }
+
+  let accountIdToUse = CF_ACCOUNT_ID;
+  if (customToken) {
+    try {
+      const accountsRes = await cfFetch('/accounts?per_page=1', 'GET', undefined, customToken);
+      if (accountsRes.success && accountsRes.result?.[0]?.id) {
+        accountIdToUse = accountsRes.result[0].id;
+      }
+    } catch {}
+  }
+
+  const createRes = await cfFetch('/zones', 'POST', {
+    name: apexDomain,
+    account: accountIdToUse ? { id: accountIdToUse } : undefined,
+    jump_start: true,
+    type: 'full',
+  }, tokenToUse);
+
+  if (!createRes.success) {
+    const errorMsg = createRes.errors?.[0]?.message || 'Failed to create Cloudflare zone';
+    throw new Error(errorMsg);
+  }
+
+  const zoneId = createRes.result?.id;
+  const nameServers: string[] = createRes.result?.name_servers || [];
+
+  // 3. Pre-create CNAME record in the new zone so routing is instant once nameservers point to CF
+  let cfDnsRecordId: string | undefined;
+  try {
+    const dnsCreated = await cfFetch(`/zones/${zoneId}/dns_records`, 'POST', {
+      type: 'CNAME',
+      name: cleanDomain,
+      content: VERTEX_CNAME_TARGET,
+      ttl: 1,
+      proxied: true,
+    }, tokenToUse);
+    if (dnsCreated.success) cfDnsRecordId = dnsCreated.result?.id;
+  } catch (e) {
+    console.warn(`[Cloudflare] Pre-creating CNAME in pending zone:`, e);
+  }
+
+  const id = uuidv4();
+  const domainRecord: OrganizationDomain = {
+    id,
+    organization_id: organizationId,
+    domain: cleanDomain,
+    domain_type: 'custom',
+    status: 'pending_verification',
+    cf_zone_id: zoneId,
+    cf_dns_record_id: cfDnsRecordId,
+    nameservers: nameServers,
+    ssl_status: 'pending',
+    added_by: userId,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  inMemoryDb.organizationDomains.set(id, domainRecord);
+  inMemoryDb.save();
+
+  return { domain: domainRecord, nameservers: nameServers, alreadyInCloudflare: false };
+}
+
+/**
+ * Check if a Cloudflare zone has become active (nameservers verified by Cloudflare)
+ */
+export async function checkCloudflareZoneActivation(
+  domainId: string,
+  organizationId: string,
+  customToken?: string
+): Promise<{ activated: boolean; status: string; nameservers?: string[]; error?: string }> {
+  const record = inMemoryDb.organizationDomains.get(domainId);
+  if (!record || record.organization_id !== organizationId) {
+    return { activated: false, status: 'not_found', error: 'Domain record not found.' };
+  }
+
+  const tokenToUse = customToken || CF_TOKEN;
+  if (!record.cf_zone_id || !tokenToUse) {
+    return { activated: false, status: record.status, error: 'No Cloudflare zone associated.' };
+  }
+
+  try {
+    const zoneRes = await cfFetch(`/zones/${record.cf_zone_id}`, 'GET', undefined, tokenToUse);
+    if (!zoneRes.success) {
+      return { activated: false, status: 'error', error: zoneRes.errors?.[0]?.message || 'Failed to inspect zone' };
+    }
+
+    const cfStatus = zoneRes.result?.status; // 'active', 'pending', 'moved', etc.
+    const nameServers: string[] = zoneRes.result?.name_servers || record.nameservers || [];
+
+    if (cfStatus === 'active') {
+      record.status = 'active';
+      record.verified_at = new Date().toISOString();
+      record.updated_at = new Date().toISOString();
+
+      // Ensure CNAME is installed
+      if (!record.cf_dns_record_id) {
+        try {
+          const cnameRes = await cfFetch(`/zones/${record.cf_zone_id}/dns_records`, 'POST', {
+            type: 'CNAME',
+            name: record.domain,
+            content: VERTEX_CNAME_TARGET,
+            ttl: 1,
+            proxied: true,
+          }, tokenToUse);
+          if (cnameRes.success) record.cf_dns_record_id = cnameRes.result?.id;
+        } catch {}
+      }
+
+      inMemoryDb.organizationDomains.set(record.id, record);
+      inMemoryDb.save();
+      rebuildDomainCache();
+
+      return { activated: true, status: 'active', nameservers: nameServers };
+    }
+
+    // Trigger Cloudflare to re-check nameservers immediately
+    try {
+      await cfFetch(`/zones/${record.cf_zone_id}/activation_check`, 'PUT', undefined, tokenToUse);
+    } catch {}
+
+    return {
+      activated: false,
+      status: cfStatus,
+      nameservers: nameServers,
+      error: 'Cloudflare has not detected your nameserver change yet. Nameserver updates typically take 5–30 minutes to propagate worldwide.',
+    };
+  } catch (e: any) {
+    return { activated: false, status: 'error', error: e.message };
+  }
+}
+
 /** Remove a domain from an org */
 export async function removeDomain(domainId: string, organizationId: string): Promise<boolean> {
   const record = inMemoryDb.organizationDomains.get(domainId);
