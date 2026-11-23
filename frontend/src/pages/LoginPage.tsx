@@ -12,6 +12,8 @@ export const LoginPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tenant, setTenant] = useState<{ name: string; domain: string } | null>(null);
+  const [isInactiveDomain, setIsInactiveDomain] = useState(false);
+  const [inactiveHost, setInactiveHost] = useState('');
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -22,6 +24,10 @@ export const LoginPage: React.FC = () => {
             name: res.organization.name,
             domain: res.domain || window.location.hostname,
           });
+        } else if (!res.isDefaultHost && !res.matched) {
+          // Custom subdomain or domain was deleted or unassigned
+          setIsInactiveDomain(true);
+          setInactiveHost(res.domain || window.location.hostname);
         }
       })
       .catch(() => {});
@@ -42,6 +48,37 @@ export const LoginPage: React.FC = () => {
       setLoading(false);
     }
   };
+
+  if (isInactiveDomain) {
+    return (
+      <div className="min-h-screen bg-gray-950 flex flex-col justify-center items-center p-4">
+        <div className="max-w-md w-full rounded-3xl bg-gray-900 border border-red-500/30 p-8 shadow-2xl text-center space-y-5 animate-in fade-in duration-200">
+          <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto text-red-400">
+            <Lock className="h-8 w-8" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold text-white tracking-tight">
+              Subdomain Inaccessible or Deleted
+            </h2>
+            <p className="text-xs text-gray-400 leading-relaxed">
+              The portal <span className="text-gray-200 font-mono font-bold">{inactiveHost}</span> has been removed or is no longer linked to an active organization.
+            </p>
+          </div>
+          <div className="p-3.5 rounded-xl bg-gray-950 border border-gray-800 text-[11px] text-gray-400 leading-relaxed">
+            If you are the team administrator, log in to the main Vertex portal to manage or re-link your custom domains.
+          </div>
+          <div className="pt-2">
+            <a
+              href="https://vertext.online"
+              className="inline-flex items-center justify-center w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-lg shadow-indigo-600/30 transition transform active:scale-95"
+            >
+              Return to Main Portal (vertext.online)
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col justify-center items-center p-4">

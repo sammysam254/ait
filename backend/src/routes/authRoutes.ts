@@ -23,6 +23,24 @@ router.post('/login', (req: Request, res: Response) => {
   const cleanHost = rawHost.split(':')[0].toLowerCase().trim();
   const domainOrgId = cleanHost ? resolveOrgFromHost(cleanHost) : null;
 
+  // Block login attempts on removed or inaccessible subdomains/domains
+  const isDefaultSystemHost = (
+    !cleanHost ||
+    cleanHost === 'localhost' ||
+    cleanHost === '127.0.0.1' ||
+    cleanHost === 'vertext.online' ||
+    cleanHost === 'www.vertext.online' ||
+    cleanHost === 'api.vertext.online' ||
+    cleanHost === 'app.vertext.online' ||
+    cleanHost === 'vertextstreams.netlify.app'
+  );
+
+  if (!isDefaultSystemHost && !domainOrgId) {
+    return res.status(404).json({
+      error: `Access Denied: The portal domain (${cleanHost}) has been deleted or is not active.`,
+    });
+  }
+
   // Look up user profile
   let profile = Array.from(inMemoryDb.profiles.values()).find(
     p => p.email.toLowerCase() === cleanEmail
@@ -169,6 +187,24 @@ router.post('/register', (req: Request, res: Response) => {
   const rawHost = (host as string) || (req.headers['x-vertex-domain'] as string) || (req.headers['x-forwarded-host'] as string) || req.headers.host || '';
   const cleanHost = rawHost.split(':')[0].toLowerCase().trim();
   const domainOrgId = cleanHost ? resolveOrgFromHost(cleanHost) : null;
+
+  // Block login attempts on removed or inaccessible subdomains/domains
+  const isDefaultSystemHost = (
+    !cleanHost ||
+    cleanHost === 'localhost' ||
+    cleanHost === '127.0.0.1' ||
+    cleanHost === 'vertext.online' ||
+    cleanHost === 'www.vertext.online' ||
+    cleanHost === 'api.vertext.online' ||
+    cleanHost === 'app.vertext.online' ||
+    cleanHost === 'vertextstreams.netlify.app'
+  );
+
+  if (!isDefaultSystemHost && !domainOrgId) {
+    return res.status(404).json({
+      error: `Access Denied: The portal domain (${cleanHost}) has been deleted or is not active.`,
+    });
+  }
 
   // On custom branded domains, public registration without invite is restricted
   if (domainOrgId && !inviteToken) {

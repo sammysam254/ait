@@ -220,7 +220,7 @@ export const SettingsPage: React.FC = () => {
     try {
       const res = await ApiService.buyDomain(buyDomainName.trim(), 1);
       const cleanTarget = buyDomainName.trim().toLowerCase();
-      const targetUrl = res.redirectUrl || `https://dash.cloudflare.com/domains/register?search=${encodeURIComponent(cleanTarget)}`;
+      const targetUrl = res.redirectUrl || `https://dash.cloudflare.com/213c27cb095ce0e114e3d5f3d3782b5d/domains/register?search=${encodeURIComponent(cleanTarget)}`;
       setActivePurchaseDomain(cleanTarget);
       setActiveStateToken(res.stateToken || '');
       setPurchaseUrl(targetUrl);

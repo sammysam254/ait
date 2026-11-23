@@ -190,7 +190,7 @@ router.get('/check-availability', authenticate, async (req: Request, res: Respon
   const domain = ((req.query.domain as string) || '').toLowerCase().trim();
   if (!domain) return res.status(400).json({ error: 'Domain name is required.' });
 
-  const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '';
+  const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '213c27cb095ce0e114e3d5f3d3782b5d';
 
   try {
     // 1. Check if domain already exists in Cloudflare zones
@@ -255,7 +255,7 @@ router.post('/buy-domain', authenticate, async (req: Request, res: Response) => 
     return res.status(400).json({ error: 'Invalid domain format. Example: mybranddevices.com' });
   }
 
-  const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '';
+  const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '213c27cb095ce0e114e3d5f3d3782b5d';
 
   // ── Create a state token so we can link the purchase back to this org ──
   // State = base64(orgId:userId:domain:timestamp) — also stored in pendingPurchases

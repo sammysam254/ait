@@ -505,6 +505,20 @@ export async function removeDomain(domainId: string, organizationId: string): Pr
     } catch (e) {}
   }
 
+  // Also delete Cloudflare worker route if one was created for this domain
+  if (CF_TOKEN && record.cf_zone_id) {
+    try {
+      const routesRes = await cfFetch(`/zones/${record.cf_zone_id}/workers/routes`);
+      if (routesRes.success && Array.isArray(routesRes.result)) {
+        for (const r of routesRes.result) {
+          if (r.pattern && r.pattern.includes(record.domain)) {
+            await cfFetch(`/zones/${record.cf_zone_id}/workers/routes/${r.id}`, 'DELETE');
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
   record.status = 'removed';
   record.updated_at = new Date().toISOString();
   inMemoryDb.organizationDomains.set(record.id, record);
