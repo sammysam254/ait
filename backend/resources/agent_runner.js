@@ -609,6 +609,9 @@ async function injectInput(serial, action, data) {
         }
         case 'text':
           if (data && data.text) {
+            if (data.text === ' ') {
+              return sendScrcpyKeycode(sock, 62); // AKEYCODE_SPACE
+            }
             return sendScrcpyText(sock, data.text);
           }
           return true;
@@ -756,8 +759,12 @@ async function injectInput(serial, action, data) {
         return true;
       }
       case 'text':
-        const escaped = (data.text || '').replace(/([^\w])/g, '\\$1');
-        sendShellInput(serial, `input text ${escaped}`);
+        if (data && data.text === ' ') {
+          sendShellInput(serial, 'input keyevent 62');
+        } else {
+          const escaped = (data.text || '').replace(/([^\w])/g, '\\$1');
+          sendShellInput(serial, `input text ${escaped}`);
+        }
         return true;
       case 'key_event':
         sendShellInput(serial, `input keyevent ${data.keyCode}`);

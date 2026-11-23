@@ -147,17 +147,74 @@ router.post('/login', (req: Request, res: Response) => {
   }
 
   const organization = inMemoryDb.organizations.get(organizationId);
+  const userOrgId = organization ? organization.id : organizationId;
+  const isSuperAdmin = profile.system_role === 'admin' || cleanEmail === 'sammyseth260@gmail.com';
+
+  // Find active subdomain or custom domain for this organization
+  const activeDomain = Array.from(inMemoryDb.organizationDomains.values()).find(
+    d => d.organization_id === userOrgId && d.status === 'active' && d.domain_type === 'subdomain'
+  ) || Array.from(inMemoryDb.organizationDomains.values()).find(
+    d => d.organization_id === userOrgId && d.status === 'active'
+  );
+  const activeSubdomain = activeDomain ? activeDomain.domain : null;
 
   const token = jwt.sign(
     {
       id: profile.id,
       email: profile.email,
       system_role: profile.system_role,
-      organizationId,
+      organizationId: userOrgId,
     },
     config.jwtSecret,
     { expiresIn: '7d' }
   );
+
+  // =========================================================================
+  // MANDATORY SUBDOMAIN ENFORCEMENT ON ROOT SYSTEM DOMAIN (vertext.online)
+  // Root domain vertext.online is reserved exclusively for Super Admin!
+  // All customers and workers must access their dashboards via dedicated subdomains.
+  // =========================================================================
+  const isRootHost = (
+    cleanHost === 'vertext.online' ||
+    cleanHost === 'www.vertext.online' ||
+    cleanHost === 'vertextstreams.netlify.app'
+  );
+
+  if (isRootHost && !isSuperAdmin) {
+    if (activeSubdomain) {
+      return res.json({
+        requiresSubdomainRedirect: true,
+        redirectUrl: `https://${activeSubdomain}`,
+        subdomain: activeSubdomain,
+        token,
+        user: {
+          id: profile.id,
+          email: profile.email,
+          fullName: profile.full_name,
+          role: profile.system_role,
+          organizationId: userOrgId,
+          organizationName: organization?.name || 'Cloud Device Farm',
+          plan: organization?.plan || 'starter',
+          subdomain: activeSubdomain,
+        },
+      });
+    } else {
+      return res.json({
+        requiresSubdomainSetup: true,
+        token,
+        user: {
+          id: profile.id,
+          email: profile.email,
+          fullName: profile.full_name,
+          role: profile.system_role,
+          organizationId: userOrgId,
+          organizationName: organization?.name || 'Cloud Device Farm',
+          plan: organization?.plan || 'starter',
+          subdomain: null,
+        },
+      });
+    }
+  }
 
   return res.json({
     token,
@@ -166,9 +223,10 @@ router.post('/login', (req: Request, res: Response) => {
       email: profile.email,
       fullName: profile.full_name,
       role: profile.system_role,
-      organizationId,
+      organizationId: userOrgId,
       organizationName: organization?.name || 'Cloud Device Farm',
       plan: organization?.plan || 'starter',
+      subdomain: activeSubdomain,
     },
   });
 });
@@ -494,15 +552,24 @@ router.get('/me', authenticate, (req: Request, res: Response) => {
     }
   }
 
+  const targetOrgId = organization ? organization.id : user.organizationId;
+  const activeDomain = Array.from(inMemoryDb.organizationDomains.values()).find(
+    d => d.organization_id === targetOrgId && d.status === 'active' && d.domain_type === 'subdomain'
+  ) || Array.from(inMemoryDb.organizationDomains.values()).find(
+    d => d.organization_id === targetOrgId && d.status === 'active'
+  );
+  const activeSubdomain = activeDomain ? activeDomain.domain : null;
+
   return res.json({
     user: {
       id: user.id,
       email: user.email,
       fullName: profile?.full_name || user.email.split('@')[0],
       role: user.system_role,
-      organizationId: organization ? organization.id : user.organizationId,
+      organizationId: targetOrgId,
       organizationName: organization?.name || 'Cloud Device Farm',
       plan: organization?.plan || 'starter',
+      subdomain: activeSubdomain,
     },
   });
 });

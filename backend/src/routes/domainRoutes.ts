@@ -10,6 +10,7 @@ import {
   createCloudflareZoneForTransfer,
   checkCloudflareZoneActivation,
   provisionSubdomain,
+  updateSubdomain,
   addExternalDomain,
   verifyExternalDomain,
   removeDomain,
@@ -182,6 +183,28 @@ router.post('/provision-subdomain', authenticate, async (req: Request, res: Resp
     });
   } catch (error: any) {
     return res.status(400).json({ error: error.message || 'Failed to provision subdomain' });
+  }
+});
+
+// PUT /api/domains/:id/subdomain - Edit / rename existing subdomain
+router.put('/:id/subdomain', authenticate, async (req: Request, res: Response) => {
+  const user = req.user!;
+  const { id } = req.params;
+  const { subdomain } = req.body;
+
+  if (!subdomain) {
+    return res.status(400).json({ error: 'New subdomain prefix is required.' });
+  }
+
+  try {
+    const updated = await updateSubdomain(user.organizationId, user.id, id, subdomain);
+    return res.json({
+      success: true,
+      message: `Subdomain updated to ${updated.domain}! Old subdomain DNS has been removed from Cloudflare.`,
+      domain: updated,
+    });
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message || 'Failed to update subdomain' });
   }
 });
 

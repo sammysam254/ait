@@ -42,7 +42,14 @@ export class ApiService {
   }
 
   // Auth: Supabase Auth as the single source of truth
-  static async login(email: string, password = ''): Promise<{ token: string; user: any }> {
+  static async login(email: string, password = ''): Promise<{
+    token: string;
+    user: any;
+    requiresSubdomainRedirect?: boolean;
+    redirectUrl?: string;
+    subdomain?: string;
+    requiresSubdomainSetup?: boolean;
+  }> {
     const cleanEmail = email.toLowerCase().trim();
     if (!cleanEmail || !password) {
       throw new Error('Please enter both email and password.');
@@ -72,7 +79,7 @@ export class ApiService {
       const token = supaData.session.access_token;
       localStorage.setItem('vtx_token', token);
 
-      let userObj = {
+      let userObj: any = {
         id: supaData.session.user.id,
         email: cleanEmail,
         fullName: isSuperAdmin ? 'Sammy Seth (Super Admin)' : (userMeta.full_name || cleanEmail.split('@')[0]),
@@ -80,6 +87,7 @@ export class ApiService {
         organizationId: isSuperAdmin ? 'aaaa0000-0000-0000-0000-000000000001' : supaData.session.user.id,
         organizationName: isSuperAdmin ? 'Vertex Global Device Farm' : `${cleanEmail.split('@')[0]}'s Cloud Devices`,
         plan: isSuperAdmin ? 'enterprise' : 'starter',
+        subdomain: undefined,
       };
 
       try {
@@ -96,7 +104,24 @@ export class ApiService {
       }
 
       localStorage.setItem('vtx_user', JSON.stringify(userObj));
-      return { token, user: userObj };
+
+      const isRootHost = (
+        window.location.hostname === 'vertext.online' ||
+        window.location.hostname === 'www.vertext.online' ||
+        window.location.hostname === 'vertextstreams.netlify.app'
+      );
+
+      const requiresSubdomainRedirect = isRootHost && !isSuperAdmin && !!userObj.subdomain;
+      const requiresSubdomainSetup = isRootHost && !isSuperAdmin && !userObj.subdomain;
+
+      return {
+        token,
+        user: userObj,
+        requiresSubdomainRedirect,
+        redirectUrl: userObj.subdomain ? `https://${userObj.subdomain}` : undefined,
+        subdomain: userObj.subdomain || undefined,
+        requiresSubdomainSetup,
+      };
     }
 
     throw new Error('Login failed. Please check your credentials.');
@@ -619,6 +644,13 @@ export class ApiService {
   static async provisionSubdomain(subdomain: string): Promise<any> {
     return await this.request<any>('/domains/provision-subdomain', {
       method: 'POST',
+      body: JSON.stringify({ subdomain }),
+    });
+  }
+
+  static async updateSubdomain(domainId: string, subdomain: string): Promise<any> {
+    return await this.request<any>(`/domains/${domainId}/subdomain`, {
+      method: 'PUT',
       body: JSON.stringify({ subdomain }),
     });
   }

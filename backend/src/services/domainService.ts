@@ -269,6 +269,12 @@ export async function provisionSubdomain(
         proxied: true,
       });
       if (created.success) cfDnsRecordId = created.result?.id;
+
+      // Attach Cloudflare Worker route for Netlify 200 OK edge routing
+      await cfFetch(`/zones/${CF_ZONE_ID}/workers/routes`, 'POST', {
+        pattern: `*${fullDomain}/*`,
+        script: 'vertex-domain-router',
+      });
     } catch (e) {}
   }
 
@@ -493,26 +499,137 @@ export async function checkCloudflareZoneActivation(
   }
 }
 
+/**
+ * Edit / Update an existing subdomain
+ * Deletes the old DNS record & route from Cloudflare via API,
+ * registers the new subdomain DNS record in Cloudflare via API,
+ * and updates the organization record.
+ */
+export async function updateSubdomain(
+  organizationId: string,
+  userId: string,
+  domainId: string,
+  newSubdomainPrefix: string
+): Promise<OrganizationDomain> {
+  const cleanSlug = newSubdomainPrefix.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+  if (!cleanSlug || cleanSlug.length < 2) {
+    throw new Error('Subdomain must be at least 2 characters long.');
+  }
+
+  const newFullDomain = `${cleanSlug}.${CF_ROOT_DOMAIN}`;
+
+  const existing = inMemoryDb.organizationDomains.get(domainId);
+  if (!existing || existing.organization_id !== organizationId) {
+    throw new Error('Subdomain record not found or unauthorized.');
+  }
+
+  if (existing.domain === newFullDomain) {
+    return existing;
+  }
+
+  // Check if new name is already taken
+  for (const d of inMemoryDb.organizationDomains.values()) {
+    if (d.domain === newFullDomain && d.status !== 'removed' && d.id !== domainId) {
+      throw new Error(`Subdomain ${newFullDomain} is already in use by another organization.`);
+    }
+  }
+
+  const oldDomainName = existing.domain;
+  const zoneId = existing.cf_zone_id || CF_ZONE_ID;
+
+  // 1. Delete OLD from Cloudflare via API
+  if (CF_TOKEN && zoneId) {
+    try {
+      if (existing.cf_dns_record_id) {
+        await cfFetch(`/zones/${zoneId}/dns_records/${existing.cf_dns_record_id}`, 'DELETE');
+      }
+      // Query by old name to delete any lingering DNS records
+      const dnsRes = await cfFetch(`/zones/${zoneId}/dns_records?name=${encodeURIComponent(oldDomainName)}`);
+      if (dnsRes.success && Array.isArray(dnsRes.result)) {
+        for (const rec of dnsRes.result) {
+          await cfFetch(`/zones/${zoneId}/dns_records/${rec.id}`, 'DELETE');
+        }
+      }
+      // Clean up old worker route
+      const routesRes = await cfFetch(`/zones/${zoneId}/workers/routes`);
+      if (routesRes.success && Array.isArray(routesRes.result)) {
+        for (const r of routesRes.result) {
+          if (r.pattern && r.pattern.includes(oldDomainName)) {
+            await cfFetch(`/zones/${zoneId}/workers/routes/${r.id}`, 'DELETE');
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`[Cloudflare] Failed cleaning old domain ${oldDomainName}:`, e);
+    }
+  }
+
+  // 2. Create NEW in Cloudflare via API
+  let newDnsRecordId: string | undefined;
+  if (CF_TOKEN && CF_ZONE_ID) {
+    try {
+      const created = await cfFetch(`/zones/${CF_ZONE_ID}/dns_records`, 'POST', {
+        type: 'CNAME',
+        name: newFullDomain,
+        content: VERTEX_CNAME_TARGET,
+        ttl: 1,
+        proxied: true,
+      });
+      if (created.success) newDnsRecordId = created.result?.id;
+
+      // Attach worker route for new domain
+      await cfFetch(`/zones/${CF_ZONE_ID}/workers/routes`, 'POST', {
+        pattern: `*${newFullDomain}/*`,
+        script: 'vertex-domain-router',
+      });
+    } catch (e) {
+      console.warn(`[Cloudflare] Error creating new subdomain ${newFullDomain}:`, e);
+    }
+  }
+
+  existing.domain = newFullDomain;
+  existing.cf_dns_record_id = newDnsRecordId;
+  existing.status = 'active';
+  existing.updated_at = new Date().toISOString();
+
+  inMemoryDb.organizationDomains.set(existing.id, existing);
+  inMemoryDb.save();
+  rebuildDomainCache();
+
+  return existing;
+}
+
 /** Remove a domain from an org */
 export async function removeDomain(domainId: string, organizationId: string): Promise<boolean> {
   const record = inMemoryDb.organizationDomains.get(domainId);
   if (!record || record.organization_id !== organizationId) return false;
 
-  // Delete CF DNS record if we created one
-  if (CF_TOKEN && record.cf_zone_id && record.cf_dns_record_id) {
-    try {
-      await cfFetch(`/zones/${record.cf_zone_id}/dns_records/${record.cf_dns_record_id}`, 'DELETE');
-    } catch (e) {}
-  }
+  const zoneId = record.cf_zone_id || CF_ZONE_ID;
 
-  // Also delete Cloudflare worker route if one was created for this domain
-  if (CF_TOKEN && record.cf_zone_id) {
+  // 1. Delete CF DNS record if we created one
+  if (CF_TOKEN && zoneId) {
+    if (record.cf_dns_record_id) {
+      try {
+        await cfFetch(`/zones/${zoneId}/dns_records/${record.cf_dns_record_id}`, 'DELETE');
+      } catch (e) {}
+    }
+    // Also query CF by exact hostname to delete any matching DNS records so it is completely removed from Cloudflare
     try {
-      const routesRes = await cfFetch(`/zones/${record.cf_zone_id}/workers/routes`);
+      const dnsRes = await cfFetch(`/zones/${zoneId}/dns_records?name=${encodeURIComponent(record.domain)}`);
+      if (dnsRes.success && Array.isArray(dnsRes.result)) {
+        for (const rec of dnsRes.result) {
+          await cfFetch(`/zones/${zoneId}/dns_records/${rec.id}`, 'DELETE');
+        }
+      }
+    } catch (e) {}
+
+    // 2. Also delete Cloudflare worker route if one was created for this domain
+    try {
+      const routesRes = await cfFetch(`/zones/${zoneId}/workers/routes`);
       if (routesRes.success && Array.isArray(routesRes.result)) {
         for (const r of routesRes.result) {
           if (r.pattern && r.pattern.includes(record.domain)) {
-            await cfFetch(`/zones/${record.cf_zone_id}/workers/routes/${r.id}`, 'DELETE');
+            await cfFetch(`/zones/${zoneId}/workers/routes/${r.id}`, 'DELETE');
           }
         }
       }

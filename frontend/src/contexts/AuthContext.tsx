@@ -6,7 +6,7 @@ import { supabase } from '../services/supabase';
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  login: (email: string, password?: string) => Promise<void>;
+  login: (email: string, password?: string) => Promise<any>;
   register: (email: string, password: string, fullName: string, companyName?: string, inviteToken?: string) => Promise<void>;
   logout: () => void;
   switchAccountDemo: (targetEmail: string) => Promise<void>;
@@ -31,6 +31,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
+    // Cross-subdomain session transfer: auto-consume token passed in query parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    const queryToken = urlParams.get('auth_token') || urlParams.get('token');
+    if (queryToken) {
+      localStorage.setItem('vtx_token', queryToken);
+      const url = new URL(window.location.href);
+      url.searchParams.delete('auth_token');
+      url.searchParams.delete('token');
+      window.history.replaceState({}, '', url.pathname + (url.search || ''));
+    }
+
     const token = localStorage.getItem('vtx_token');
     if (token) {
       fetchCurrentUser();
@@ -45,6 +56,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const resp = await ApiService.login(email, password);
       localStorage.setItem('vtx_token', resp.token);
       setUser(resp.user);
+      return resp;
     } finally {
       setLoading(false);
     }

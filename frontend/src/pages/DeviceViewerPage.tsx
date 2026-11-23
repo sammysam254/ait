@@ -1285,40 +1285,74 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
     };
   }, [canControl]);
 
-  // Physical keyboard typing listener when the screen viewer overlay is focused
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (!canControl) return;
-    const target = e.target as HTMLElement;
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+  // Physical external computer keyboard typing listener: catches keystrokes globally
+  // and routes them directly to the remote Android device
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (!canControl) return;
 
-    if (e.key === 'Backspace') {
-      e.preventDefault();
-      sendInput('key_event', { keyCode: 67 }); // AKEYCODE_DEL
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      sendInput('key_event', { keyCode: 66 }); // AKEYCODE_ENTER
-    } else if (e.key === 'Tab') {
-      e.preventDefault();
-      sendInput('key_event', { keyCode: 61 }); // AKEYCODE_TAB
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      sendInput('key_event', { keyCode: 111 }); // AKEYCODE_ESCAPE
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      sendInput('key_event', { keyCode: 19 });
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      sendInput('key_event', { keyCode: 20 });
-    } else if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      sendInput('key_event', { keyCode: 21 });
-    } else if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      sendInput('key_event', { keyCode: 22 });
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      sendInput('text', { text: e.key });
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable ||
+          target.closest('input, textarea, [contenteditable="true"]'))
+      ) {
+        return; // Allow typing in local web inputs (like the manual prompt bar or search bars)
+      }
+
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 67 }); // AKEYCODE_DEL
+      } else if (e.key === 'Delete') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 112 }); // AKEYCODE_FORWARD_DEL
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 66 }); // AKEYCODE_ENTER
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 61 }); // AKEYCODE_TAB
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 111 }); // AKEYCODE_ESCAPE
+      } else if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 62 }); // AKEYCODE_SPACE
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 19 });
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 20 });
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 21 });
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 22 });
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        sendInput('key_event', { keyCode: 3 }); // AKEYCODE_HOME
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        sendInput('text', { text: e.key });
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown, true);
+    if (overlayRef.current) {
+      overlayRef.current.focus();
     }
+
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown, true);
+    };
+  }, [canControl, id, shareDeviceId, streamDimensions, device]);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Handled by global capture listener above
   };
 
   const handleSendTextSubmit = (e: React.FormEvent) => {
