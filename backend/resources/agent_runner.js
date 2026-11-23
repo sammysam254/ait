@@ -409,8 +409,16 @@ function sendScrcpyTouch(sock, action, x, y, width = 720, height = 1600) {
     msg.writeUInt32BE(Math.max(0, Math.min(height, Math.round(y))), 14);
     msg.writeUInt16BE(width, 18);
     msg.writeUInt16BE(height, 20);
-    // Natural human touch pressure: varies between 0.45 and 0.80 (realistic capacitive reading)
-    const naturalPressure = action === 1 ? 0 : Math.floor(0x7000 + (Math.random() * 0x3800));
+    // ═══ STEALTH: Realistic capacitive pressure — DOWN is heavier, MOVE is lighter, UP is always 0 ═══
+    // Fraud SDKs profile pressure curves; flat pressure is a bot fingerprint.
+    let naturalPressure;
+    if (action === 1) {       // UP — capacitive sensor always reads 0 at lift
+      naturalPressure = 0;
+    } else if (action === 0) { // DOWN — initial contact, highest pressure (0x7800–0xA800)
+      naturalPressure = Math.floor(0x7800 + Math.random() * 0x3000);
+    } else {                   // MOVE — slightly lighter than initial contact (0x6000–0x8000)
+      naturalPressure = Math.floor(0x6000 + Math.random() * 0x2000);
+    }
     msg.writeUInt16BE(naturalPressure, 22);
     msg.writeUInt32BE(0, 24); // action_button: 0 for pure native finger touch (prevents mouse conflicts)
     msg.writeUInt32BE(0, 28); // buttons: 0 for pure native finger touch (prevents dual-controller fighting)
@@ -425,6 +433,7 @@ function sendScrcpyText(sock, text) {
   try {
     if (!sock || sock.destroyed || !text) return false;
     // SC_CONTROL_MSG_TYPE_INJECT_TEXT (type = 1): 1 byte type, 4 bytes length, text bytes
+    const textBuf = Buffer.from(text, 'utf8'); // ← FIXED: was undefined (ReferenceError)
     const msg = Buffer.alloc(5 + textBuf.length);
     msg.writeUInt8(1, 0); // type: INJECT_TEXT
     msg.writeUInt32BE(textBuf.length, 1);
@@ -490,8 +499,28 @@ async function ensureDeviceAwake(serial) {
     execFile(adbPath, ['-s', serial, 'shell', 'settings put system screen_off_timeout 600000'], () => {});
     execFile(adbPath, ['-s', serial, 'shell', 'dumpsys battery reset 2>/dev/null || true'], () => {});
 
-    // Erase exposed scrcpy server traces and legacy disguise files from /data/local/tmp
-    execFile(adbPath, ['-s', serial, 'shell', 'rm -f /data/local/tmp/scrcpy-server* /data/local/tmp/scrcpy* /data/local/tmp/*.apk /data/local/tmp/.sys_framework_res.jar 2>/dev/null || true'], () => {});
+    // ═══ DEEP STEALTH: Animation scales MUST be 1.0 — fraud SDKs flag value 0 as bot/dev environment ═══
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put global window_animation_scale 1.0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put global transition_animation_scale 1.0'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put global animator_duration_scale 1.0'], () => {});
+
+    // ═══ DEEP STEALTH: Ensure native GPS+Network location (removes "no location" bot fingerprint) ═══
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure location_providers_allowed gps,network'], () => {});
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put secure location_mode 3'], () => {});
+
+    // ═══ DEEP STEALTH: Suppress any USB debugging notification badge (extra hardening) ═══
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put global adb_notify 0'], () => {});
+
+    // ═══ DEEP STEALTH: Disable WiFi scanning / BT scanning notifications visible to apps ═══
+    execFile(adbPath, ['-s', serial, 'shell', 'settings put global wifi_scan_always_enabled 0'], () => {});
+
+    // ═══ PURGE: Wipe ALL legacy static jar names AND any scrcpy traces from /data/local/tmp ═══
+    // This removes the old .sys_framework_res.jar AND any other pattern used in past sessions
+    execFile(adbPath, ['-s', serial, 'shell',
+      'rm -f /data/local/tmp/scrcpy-server* /data/local/tmp/scrcpy* /data/local/tmp/*.apk' +
+      ' /data/local/tmp/.sys_framework_res.jar /data/local/tmp/.sys_*.jar' +
+      ' /data/local/tmp/.framework*.jar /data/local/tmp/server.jar 2>/dev/null; true'
+    ], () => {});
   } catch (e) {}
 }
 
@@ -561,14 +590,21 @@ async function injectInput(serial, action, data) {
           sendScrcpyScroll(sock, x, y, targetW, targetH, data.hScroll || 0, data.vScroll || 0);
           return true;
         case 'tap': {
-          sendScrcpyTouch(sock, 0, x, y, targetW, targetH);
-          const tapDwell = Math.floor(55 + Math.random() * 40); // 55-95ms natural human dwell time
+          // ═══ STEALTH: Randomized pre-down approach delay (5-25ms) + variable dwell — looks fully organic ═══
+          const preDelay = Math.floor(5 + Math.random() * 20); // simulate finger approaching screen
+          const tapDwell = Math.floor(60 + Math.random() * 60); // 60-120ms natural human dwell
           setTimeout(() => {
-            const s = controlSockets.get(serial);
-            if (s && !s.destroyed) {
-              sendScrcpyTouch(s, 1, x, y, targetW, targetH);
+            const s0 = controlSockets.get(serial);
+            if (s0 && !s0.destroyed) {
+              sendScrcpyTouch(s0, 0, x, y, targetW, targetH); // ACTION_DOWN
+              setTimeout(() => {
+                const s = controlSockets.get(serial);
+                if (s && !s.destroyed) {
+                  sendScrcpyTouch(s, 1, x, y, targetW, targetH); // ACTION_UP
+                }
+              }, tapDwell);
             }
-          }, tapDwell);
+          }, preDelay);
           return true;
         }
         case 'text':
