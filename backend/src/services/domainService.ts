@@ -54,12 +54,13 @@ export function resolveOrgFromHost(hostname: string): string | null {
 }
 
 /** Call Cloudflare API */
-async function cfFetch(path: string, method = 'GET', body?: object): Promise<any> {
+async function cfFetch(path: string, method = 'GET', body?: object, customToken?: string): Promise<any> {
+  const token = customToken || CF_TOKEN;
   const url = `${CF_API}${path}`;
   const opts: RequestInit = {
     method,
     headers: {
-      'Authorization': `Bearer ${CF_TOKEN}`,
+      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -68,11 +69,13 @@ async function cfFetch(path: string, method = 'GET', body?: object): Promise<any
   return res.json();
 }
 
-/** List all Cloudflare zones in Sammy's account (for the domain search/picker) */
-export async function listCloudflareZones(): Promise<{ id: string; name: string; status: string }[]> {
-  if (!CF_TOKEN) return [];
+/** List all Cloudflare zones (optionally using a custom token) */
+export async function listCloudflareZones(customToken?: string): Promise<{ id: string; name: string; status: string }[]> {
+  const token = customToken || CF_TOKEN;
+  if (!token) return [];
   try {
-    const data = await cfFetch(`/zones?account.id=${CF_ACCOUNT_ID}&per_page=100`);
+    // Fetch all accessible zones without restricting by account ID
+    const data = await cfFetch('/zones?per_page=100', 'GET', undefined, token);
     if (!data.success) return [];
     return (data.result || []).map((z: any) => ({ id: z.id, name: z.name, status: z.status }));
   } catch (e) {
@@ -80,16 +83,15 @@ export async function listCloudflareZones(): Promise<{ id: string; name: string;
   }
 }
 
-/** Search if a specific domain is in Sammy's Cloudflare account */
-export async function findCloudflareZoneForDomain(domain: string): Promise<{ id: string; name: string } | null> {
-  if (!CF_TOKEN) return null;
+/** Search if a specific domain is in Cloudflare account */
+export async function findCloudflareZoneForDomain(domain: string, customToken?: string): Promise<{ id: string; name: string } | null> {
+  const token = customToken || CF_TOKEN;
+  if (!token) return null;
   try {
-    // Try exact zone name match first
     const domainParts = domain.toLowerCase().split('.');
-    // Try matching apex domain (last two parts) and sub-domains
     for (let i = 0; i < domainParts.length - 1; i++) {
       const candidate = domainParts.slice(i).join('.');
-      const data = await cfFetch(`/zones?name=${encodeURIComponent(candidate)}&account.id=${CF_ACCOUNT_ID}`);
+      const data = await cfFetch(`/zones?name=${encodeURIComponent(candidate)}`, 'GET', undefined, token);
       if (data.success && data.result?.length > 0) {
         return { id: data.result[0].id, name: data.result[0].name };
       }
@@ -101,36 +103,54 @@ export async function findCloudflareZoneForDomain(domain: string): Promise<{ id:
 }
 
 /**
- * FLOW A: Domain is in Sammy's Cloudflare — auto-add CNAME pointing to Vertex
+ * FLOW A: Domain is in Cloudflare — auto-add CNAME pointing to Vertex
+ * Cleans up any conflicting A / AAAA records automatically to prevent
+ * "An A, AAAA, or CNAME record with that host already exists" error.
  */
 export async function connectCloudflareZoneDomain(
   organizationId: string,
   userId: string,
-  domain: string,            // e.g. "app.clienta.com"  or "clienta.com"
+  domain: string,            // e.g. "app.clienta.com" or "clienta.com"
   cfZoneId: string,
+  customToken?: string,
 ): Promise<OrganizationDomain> {
   const id = uuidv4();
   const cleanDomain = domain.toLowerCase().trim();
   const verificationToken = `vtx-verify=${uuidv4().replace(/-/g, '').slice(0, 24)}`;
+  const tokenToUse = customToken || CF_TOKEN;
 
-  // Add CNAME record pointing to our app
   let cfDnsRecordId: string | undefined;
   let dnsError: string | undefined;
 
-  if (CF_TOKEN && cfZoneId) {
+  if (tokenToUse && cfZoneId) {
     try {
-      // Check if a record already exists
-      const existing = await cfFetch(`/zones/${cfZoneId}/dns_records?name=${cleanDomain}&type=CNAME`);
-      if (existing.success && existing.result?.length > 0) {
-        cfDnsRecordId = existing.result[0].id;
-        // Patch it to point to our target
-        await cfFetch(`/zones/${cfZoneId}/dns_records/${cfDnsRecordId}`, 'PUT', {
+      // 1. Fetch ALL existing records matching this exact hostname (A, AAAA, CNAME)
+      const existing = await cfFetch(`/zones/${cfZoneId}/dns_records?name=${encodeURIComponent(cleanDomain)}`, 'GET', undefined, tokenToUse);
+      
+      if (existing.success && Array.isArray(existing.result)) {
+        for (const rec of existing.result) {
+          if (rec.type === 'A' || rec.type === 'AAAA') {
+            // Delete conflicting A or AAAA records so CNAME can be installed cleanly
+            console.log(`[Cloudflare] Deleting conflicting ${rec.type} record for ${cleanDomain} (ID: ${rec.id})`);
+            await cfFetch(`/zones/${cfZoneId}/dns_records/${rec.id}`, 'DELETE', undefined, tokenToUse);
+          } else if (rec.type === 'CNAME') {
+            cfDnsRecordId = rec.id;
+          }
+        }
+      }
+
+      // 2. Create or update CNAME pointing to Vertex CNAME target
+      if (cfDnsRecordId) {
+        const updated = await cfFetch(`/zones/${cfZoneId}/dns_records/${cfDnsRecordId}`, 'PUT', {
           type: 'CNAME',
           name: cleanDomain,
           content: VERTEX_CNAME_TARGET,
           ttl: 1, // Auto
           proxied: true,
-        });
+        }, tokenToUse);
+        if (!updated.success) {
+          dnsError = updated.errors?.[0]?.message || 'Failed to update existing CNAME record';
+        }
       } else {
         const created = await cfFetch(`/zones/${cfZoneId}/dns_records`, 'POST', {
           type: 'CNAME',
@@ -138,7 +158,7 @@ export async function connectCloudflareZoneDomain(
           content: VERTEX_CNAME_TARGET,
           ttl: 1,
           proxied: true,
-        });
+        }, tokenToUse);
         if (created.success) {
           cfDnsRecordId = created.result?.id;
         } else {
@@ -155,13 +175,13 @@ export async function connectCloudflareZoneDomain(
     organization_id: organizationId,
     domain: cleanDomain,
     domain_type: cleanDomain.endsWith(`.${CF_ROOT_DOMAIN}`) ? 'subdomain' : 'custom',
-    status: (CF_TOKEN && cfZoneId && !dnsError) ? 'active' : 'pending_verification',
+    status: (tokenToUse && cfZoneId && !dnsError) ? 'active' : 'pending_verification',
     cf_zone_id: cfZoneId,
     cf_dns_record_id: cfDnsRecordId,
     verification_token: verificationToken,
     ssl_status: 'pending',
     added_by: userId,
-    verified_at: (!dnsError && CF_TOKEN) ? new Date().toISOString() : undefined,
+    verified_at: (!dnsError && tokenToUse) ? new Date().toISOString() : undefined,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };

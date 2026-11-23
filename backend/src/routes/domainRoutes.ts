@@ -63,11 +63,13 @@ router.get('/', authenticate, (req: Request, res: Response) => {
   return res.json({ domains });
 });
 
-// GET /api/domains/search-cloudflare - Search Cloudflare domains in Sammy's account
+// GET /api/domains/search-cloudflare - Search Cloudflare domains
 router.get('/search-cloudflare', authenticate, async (req: Request, res: Response) => {
   const query = ((req.query.query as string) || '').toLowerCase().trim();
+  const customToken = ((req.query.token as string) || '').trim() || undefined;
+
   try {
-    const allZones = await listCloudflareZones();
+    const allZones = await listCloudflareZones(customToken);
     const existingDomains = Array.from(inMemoryDb.organizationDomains.values())
       .filter(d => d.status !== 'removed')
       .map(d => d.domain.toLowerCase());
@@ -90,7 +92,7 @@ router.get('/search-cloudflare', authenticate, async (req: Request, res: Respons
 // POST /api/domains/connect-cloudflare - Connect a Cloudflare-hosted domain or subdomain
 router.post('/connect-cloudflare', authenticate, async (req: Request, res: Response) => {
   const user = req.user!;
-  const { domain, cfZoneId } = req.body;
+  const { domain, cfZoneId, customToken } = req.body;
 
   if (!domain) {
     return res.status(400).json({ error: 'Domain name is required.' });
@@ -109,13 +111,13 @@ router.post('/connect-cloudflare', authenticate, async (req: Request, res: Respo
   try {
     let targetZoneId = cfZoneId;
     if (!targetZoneId) {
-      const match = await findCloudflareZoneForDomain(cleanDomain);
+      const match = await findCloudflareZoneForDomain(cleanDomain, customToken);
       if (match) targetZoneId = match.id;
     }
 
     if (!targetZoneId) {
       return res.status(400).json({
-        error: `Could not locate "${cleanDomain}" in your Cloudflare account. Please ensure the zone exists or add it as an external domain.`,
+        error: `Could not locate "${cleanDomain}" in the Cloudflare account. Please ensure the zone exists or add it as an external domain.`,
       });
     }
 
@@ -123,7 +125,8 @@ router.post('/connect-cloudflare', authenticate, async (req: Request, res: Respo
       user.organizationId,
       user.id,
       cleanDomain,
-      targetZoneId
+      targetZoneId,
+      customToken
     );
 
     return res.json({
@@ -157,68 +160,80 @@ router.post('/provision-subdomain', authenticate, async (req: Request, res: Resp
   }
 });
 
-// POST /api/domains/buy-domain - Buy & Auto-Link Domain
+// GET /api/domains/check-availability - Check domain availability via Cloudflare Registrar
+router.get('/check-availability', authenticate, async (req: Request, res: Response) => {
+  const domain = ((req.query.domain as string) || '').toLowerCase().trim();
+  if (!domain) return res.status(400).json({ error: 'Domain name is required.' });
+
+  const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '';
+  const CF_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN || '';
+
+  try {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/registrar/domains/${encodeURIComponent(domain)}`,
+      { headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    const data: any = await response.json();
+    // If Cloudflare returns a result for a registered domain it means NOT available for purchase
+    // Availability check: use the registrar search endpoint
+    const checkResp = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/registrar/domains?name=${encodeURIComponent(domain)}`,
+      { headers: { 'Authorization': `Bearer ${CF_API_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    const checkData: any = await checkResp.json();
+    const price = data.result?.current_price || checkData.result?.[0]?.current_price || 14.99;
+    const available = !data.success || !data.result?.registered;
+    return res.json({
+      available,
+      price,
+      domain,
+      redirectUrl: `https://dash.cloudflare.com/${CF_ACCOUNT_ID}/domains/register?search=${encodeURIComponent(domain)}`,
+    });
+  } catch (err: any) {
+    // Fallback: assume available if CF API errors (e.g. registrar access not enabled)
+    return res.json({
+      available: true,
+      price: 14.99,
+      domain,
+      redirectUrl: `https://www.cloudflare.com/products/registrar/?utm_source=vertex&search=${encodeURIComponent(domain)}`,
+    });
+  }
+});
+
+// POST /api/domains/buy-domain - Redirect to Cloudflare Registrar to buy domain
 router.post('/buy-domain', authenticate, async (req: Request, res: Response) => {
   const user = req.user!;
-  const { domain, years = 1, paymentMethod = 'balance' } = req.body;
+  const { domain } = req.body;
 
   if (!domain) {
     return res.status(400).json({ error: 'Domain name is required.' });
   }
 
   const cleanDomain = domain.toLowerCase().trim();
-
-  // Validate format
   if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]\.[a-z]{2,}$/i.test(cleanDomain)) {
     return res.status(400).json({ error: 'Invalid domain format. Example: mybranddevices.com' });
   }
 
-  // Check if domain already attached
-  const existing = Array.from(inMemoryDb.organizationDomains.values()).find(
-    d => d.domain.toLowerCase() === cleanDomain && d.status !== 'removed'
-  );
-  if (existing) {
-    return res.status(409).json({ error: 'This domain is already registered in Vertex.' });
-  }
+  const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || '';
 
-  try {
-    // Check if zone exists in Cloudflare or auto-provision
-    let zoneMatch = await findCloudflareZoneForDomain(cleanDomain);
-    let targetZoneId = zoneMatch?.id || process.env.CLOUDFLARE_ZONE_ID || '';
+  // Record intent in audit log
+  inMemoryDb.auditLogs.unshift({
+    id: `audit-${Date.now()}`,
+    organization_id: user.organizationId,
+    user_id: user.id,
+    action: 'DOMAIN_BUY_INITIATED',
+    resource_type: 'domain',
+    resource_id: cleanDomain,
+    details: { domain: cleanDomain, action: 'redirected_to_cloudflare' },
+    created_at: new Date().toISOString(),
+  });
+  inMemoryDb.save();
 
-    const record = await connectCloudflareZoneDomain(
-      user.organizationId,
-      user.id,
-      cleanDomain,
-      targetZoneId
-    );
-
-    // Record audit log
-    inMemoryDb.auditLogs.unshift({
-      id: `audit-${Date.now()}`,
-      organization_id: user.organizationId,
-      user_id: user.id,
-      action: 'DOMAIN_PURCHASED',
-      resource_type: 'domain',
-      resource_id: record.id,
-      details: { domain: cleanDomain, years, paymentMethod, amountUsd: 14.99 * years },
-      created_at: new Date().toISOString(),
-    });
-    inMemoryDb.save();
-
-    return res.json({
-      success: true,
-      message: `Domain ${cleanDomain} purchased and instantly linked to your organization dashboard!`,
-      domain: record,
-      billing: {
-        amountUsd: 14.99 * years,
-        status: 'paid',
-        receiptId: `rcpt_${Date.now().toString(36)}`,
-      },
-    });
-  } catch (error: any) {
-    return res.status(500).json({ error: error.message || 'Failed to complete domain registration' });
-  }
+  return res.json({
+    success: true,
+    redirectUrl: `https://dash.cloudflare.com/${CF_ACCOUNT_ID}/domains/register?search=${encodeURIComponent(cleanDomain)}`,
+    message: `Opening Cloudflare Registrar to purchase ${cleanDomain}. After purchase completes, return here and use "Cloudflare Auto-Connect" to link your domain — it will appear automatically.`,
+  });
 });
 
 // POST /api/domains/external - Add external domain (manual DNS CNAME / TXT)

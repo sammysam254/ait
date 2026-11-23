@@ -599,15 +599,21 @@ export class ApiService {
     return await this.request<{ domains: any[] }>('/domains');
   }
 
-  static async searchCloudflareZones(query = ''): Promise<{ zones: any[] }> {
-    return await this.request<{ zones: any[] }>(`/domains/search-cloudflare?query=${encodeURIComponent(query)}`);
+  static async searchCloudflareZones(query = '', customToken?: string): Promise<{ zones: any[] }> {
+    const params = new URLSearchParams({ query });
+    if (customToken) params.set('token', customToken);
+    return await this.request<{ zones: any[] }>(`/domains/search-cloudflare?${params.toString()}`);
   }
 
-  static async connectCloudflareDomain(domain: string, cfZoneId?: string): Promise<any> {
+  static async connectCloudflareDomain(domain: string, cfZoneId?: string, customToken?: string): Promise<any> {
     return await this.request<any>('/domains/connect-cloudflare', {
       method: 'POST',
-      body: JSON.stringify({ domain, cfZoneId }),
+      body: JSON.stringify({ domain, cfZoneId, customToken }),
     });
+  }
+
+  static async checkDomainAvailability(domain: string): Promise<{ available: boolean; price?: number; redirectUrl?: string }> {
+    return await this.request<any>(`/domains/check-availability?domain=${encodeURIComponent(domain)}`);
   }
 
   static async provisionSubdomain(subdomain: string): Promise<any> {
