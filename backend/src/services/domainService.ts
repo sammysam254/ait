@@ -165,6 +165,14 @@ export async function connectCloudflareZoneDomain(
           dnsError = created.errors?.[0]?.message || 'DNS creation failed';
         }
       }
+
+      // 3. Bind Cloudflare Worker route so Netlify serves custom domain with 200 OK without "Site not found"
+      try {
+        await cfFetch(`/zones/${cfZoneId}/workers/routes`, 'POST', {
+          pattern: `*${cleanDomain}/*`,
+          script: 'vertex-domain-router',
+        }, tokenToUse);
+      } catch (e) {}
     } catch (e: any) {
       dnsError = e.message;
     }
