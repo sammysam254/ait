@@ -162,6 +162,22 @@ export interface Invitation {
   expires_at: string;
 }
 
+export interface OrganizationDomain {
+  id: string;
+  organization_id: string;
+  domain: string;             // e.g. "app.clienta.com" or "clienta.vertext.online"
+  domain_type: 'custom' | 'subdomain'; // custom = customer's own domain; subdomain = vertext.online subdomain
+  status: 'pending_verification' | 'active' | 'failed' | 'removed';
+  cf_zone_id?: string;        // Cloudflare zone ID if domain lives in Sammy's CF account
+  cf_dns_record_id?: string;  // DNS record ID we created
+  verification_token?: string; // TXT record value for external domain ownership verification
+  ssl_status: 'pending' | 'active' | 'failed';
+  added_by: string;           // user_id
+  verified_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AuditLog {
   id: string;
   organization_id?: string;
@@ -185,6 +201,7 @@ class InMemoryDatabase {
   assignedUsers: Map<string, AssignedUser> = new Map();
   deviceAssignments: Map<string, DeviceAssignment> = new Map();
   invitations: Map<string, Invitation> = new Map();
+  organizationDomains: Map<string, OrganizationDomain> = new Map();
   auditLogs: AuditLog[] = [];
 
   private dbFilePath = process.env.VERTEX_DATA_PATH || path.join(process.cwd(), 'data', 'vertex_state.json');
@@ -226,6 +243,9 @@ class InMemoryDatabase {
         if (data.invitations) {
           for (const [k, v] of Object.entries(data.invitations)) this.invitations.set(k, v as Invitation);
         }
+        if (data.organizationDomains) {
+          for (const [k, v] of Object.entries(data.organizationDomains)) this.organizationDomains.set(k, v as OrganizationDomain);
+        }
         if (Array.isArray(data.auditLogs)) this.auditLogs = data.auditLogs;
         console.log(`[Database] Loaded persistent state (${this.devices.size} devices, ${this.deviceAssignments.size} assignments, ${this.assignedUsers.size} workers) from ${this.dbFilePath}`);
       }
@@ -250,6 +270,7 @@ class InMemoryDatabase {
         assignedUsers: Object.fromEntries(this.assignedUsers),
         deviceAssignments: Object.fromEntries(this.deviceAssignments),
         invitations: Object.fromEntries(this.invitations),
+        organizationDomains: Object.fromEntries(this.organizationDomains),
         auditLogs: this.auditLogs.slice(0, 500),
       };
       fs.writeFileSync(this.dbFilePath, JSON.stringify(data, null, 2), 'utf8');

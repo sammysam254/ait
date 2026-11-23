@@ -4,18 +4,24 @@ import { v4 as uuidv4 } from 'uuid';
 import { config } from '../config';
 import { inMemoryDb, Profile, Organization } from '../database/supabaseClient';
 import { authenticate } from '../middleware/auth';
+import { resolveOrgFromHost } from '../services/domainService';
 
 const router = Router();
 
 // POST /api/auth/login
 router.post('/login', (req: Request, res: Response) => {
-  const { email, password } = req.body;
+  const { email, password, host } = req.body;
 
   if (!email) {
     return res.status(400).json({ error: 'Email is required.' });
   }
 
   const cleanEmail = email.toLowerCase().trim();
+
+  // Resolve custom domain organization if visiting via a custom domain
+  const rawHost = (host as string) || (req.headers['x-vertex-domain'] as string) || (req.headers['x-forwarded-host'] as string) || req.headers.host || '';
+  const cleanHost = rawHost.split(':')[0].toLowerCase().trim();
+  const domainOrgId = cleanHost ? resolveOrgFromHost(cleanHost) : null;
 
   // Look up user profile
   let profile = Array.from(inMemoryDb.profiles.values()).find(
@@ -53,8 +59,30 @@ router.post('/login', (req: Request, res: Response) => {
     return res.status(401).json({ error: 'No account found with this email. Please register or accept your team invitation.' });
   }
 
+  // =========================================================================
+  // DOMAIN-LEVEL MULTI-TENANT ACCESS CONTROL
+  // Workers and clients can ONLY sign in through their assigned domain/organization.
+  // =========================================================================
+  if (domainOrgId) {
+    const domainOrg = inMemoryDb.organizations.get(domainOrgId);
+    const isSuperAdmin = profile.system_role === 'admin' || cleanEmail === 'sammyseth260@gmail.com';
+
+    if (!isSuperAdmin) {
+      const isOwnerOfDomainOrg = domainOrg && domainOrg.owner_id === profile.id;
+      const isWorkerInDomainOrg = Array.from(inMemoryDb.assignedUsers.values()).some(
+        au => au.organization_id === domainOrgId && (au.user_id === profile!.id || au.email.toLowerCase() === cleanEmail)
+      );
+
+      if (!isOwnerOfDomainOrg && !isWorkerInDomainOrg) {
+        return res.status(403).json({
+          error: `Access Denied: Your account does not belong to ${domainOrg?.name || 'this organization'}. Workers and clients can only sign in through their assigned organization portal.`,
+        });
+      }
+    }
+  }
+
   // Find their organization
-  let organizationId = '';
+  let organizationId = domainOrgId || '';
 
   // 1. Check if assigned subordinate worker or pre-invited
   const assignedUser = Array.from(inMemoryDb.assignedUsers.values()).find(
@@ -129,13 +157,26 @@ router.post('/login', (req: Request, res: Response) => {
 
 // POST /api/auth/register
 router.post('/register', (req: Request, res: Response) => {
-  const { email, password, fullName, companyName, inviteToken } = req.body;
+  const { email, password, fullName, companyName, inviteToken, host } = req.body;
 
   if (!email) {
     return res.status(400).json({ error: 'Email is required.' });
   }
 
   const cleanEmail = email.toLowerCase().trim();
+
+  // Resolve custom domain organization if visiting via a custom domain
+  const rawHost = (host as string) || (req.headers['x-vertex-domain'] as string) || (req.headers['x-forwarded-host'] as string) || req.headers.host || '';
+  const cleanHost = rawHost.split(':')[0].toLowerCase().trim();
+  const domainOrgId = cleanHost ? resolveOrgFromHost(cleanHost) : null;
+
+  // On custom branded domains, public registration without invite is restricted
+  if (domainOrgId && !inviteToken) {
+    const domainOrg = inMemoryDb.organizations.get(domainOrgId);
+    return res.status(403).json({
+      error: `Registration on ${domainOrg?.name || 'this portal'} is by invitation only. Please contact your administrator for an invite link.`,
+    });
+  }
 
   // =========================================================================
   // SUBORDINATE WORKER INVITATION FLOW
@@ -147,6 +188,12 @@ router.post('/register', (req: Request, res: Response) => {
 
     if (!invite) {
       return res.status(400).json({ error: 'Invalid or expired invitation link. Please request a new invite from your team owner.' });
+    }
+
+    if (domainOrgId && invite.organization_id !== domainOrgId) {
+      return res.status(400).json({
+        error: 'This invitation was issued for another organization. Please access the invitation from the appropriate organization portal.',
+      });
     }
 
     if (invite.status === 'expired' || new Date(invite.expires_at).getTime() < Date.now()) {

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { inMemoryDb } from '../database/supabaseClient';
+import { resolveOrgFromHost } from '../services/domainService';
 
 export interface AuthenticatedUser {
   id: string;
@@ -130,6 +131,18 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
       system_role: isSuperAdmin ? 'admin' : (assignedUser ? 'assigned_user' : 'customer'),
       organizationId: organizationId,
     };
+
+    // Cross-tenant custom domain boundary check
+    const rawHost = (req.headers['x-vertex-domain'] as string) || (req.headers['x-forwarded-host'] as string) || req.headers.host || '';
+    const cleanHost = rawHost.split(':')[0].toLowerCase().trim();
+    if (cleanHost) {
+      const domainOrgId = resolveOrgFromHost(cleanHost);
+      if (domainOrgId && !isSuperAdmin && organizationId !== domainOrgId) {
+        return res.status(403).json({
+          error: 'Cross-tenant domain access denied. Please access your devices through your assigned organization domain.',
+        });
+      }
+    }
 
     next();
   } catch (err) {

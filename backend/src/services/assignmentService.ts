@@ -3,6 +3,7 @@ import { inMemoryDb, AssignedUser, DeviceAssignment, Profile, Invitation } from 
 import { SharingService } from './sharingService';
 import { EmailService } from './emailService';
 import { config } from '../config';
+import { getPrimaryDomainForOrg } from './domainService';
 
 export class AssignmentService {
   /**
@@ -128,8 +129,10 @@ export class AssignmentService {
     };
     inMemoryDb.invitations.set(invitation.id, invitation);
 
-    // Build the direct registration link
-    const inviteUrl = `${config.frontendUrl}/register?inviteToken=${inviteToken}&email=${encodeURIComponent(cleanEmail)}`;
+    // Build the direct registration link using custom domain if configured
+    const customBase = getPrimaryDomainForOrg(organizationId);
+    const baseUrl = customBase || config.frontendUrl;
+    const inviteUrl = `${baseUrl}/register?inviteToken=${inviteToken}&email=${encodeURIComponent(cleanEmail)}`;
 
     // Inviter info for email
     const inviter = inMemoryDb.profiles.get(invitedByUserId);

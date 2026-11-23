@@ -15,6 +15,7 @@ import assignmentRoutes from './routes/assignmentRoutes';
 import cloudflareRoutes from './routes/cloudflareRoutes';
 import adminRoutes from './routes/adminRoutes';
 import subscriptionRoutes from './routes/subscriptionRoutes';
+import domainRoutes from './routes/domainRoutes';
 
 const app = express();
 
@@ -52,6 +53,7 @@ app.use('/api/assignments', assignmentRoutes);
 app.use('/api/cloudflare', cloudflareRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/subscription', subscriptionRoutes);
+app.use('/api/domains', domainRoutes);
 
 // Global Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {

@@ -14,6 +14,10 @@ export class ApiService {
       ...(options.headers as Record<string, string>),
     };
 
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      headers['X-Vertex-Domain'] = window.location.hostname;
+    }
+
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
     }
@@ -83,7 +87,13 @@ export class ApiService {
         if (meRes?.user) {
           userObj = { ...userObj, ...meRes.user };
         }
-      } catch (e) {}
+      } catch (e: any) {
+        if (e.message && (e.message.includes('Access Denied') || e.message.includes('denied') || e.message.includes('Cross-tenant'))) {
+          localStorage.removeItem('vtx_token');
+          await supabase.auth.signOut().catch(() => {});
+          throw e;
+        }
+      }
 
       localStorage.setItem('vtx_user', JSON.stringify(userObj));
       return { token, user: userObj };
@@ -261,7 +271,13 @@ export class ApiService {
         if (meRes?.user) {
           userObj = { ...userObj, ...meRes.user };
         }
-      } catch (e) {}
+      } catch (e: any) {
+        if (e.message && (e.message.includes('Access Denied') || e.message.includes('denied') || e.message.includes('Cross-tenant'))) {
+          localStorage.removeItem('vtx_token');
+          await supabase.auth.signOut().catch(() => {});
+          throw e;
+        }
+      }
 
       localStorage.setItem('vtx_user', JSON.stringify(userObj));
       return { user: userObj };
@@ -573,5 +589,62 @@ export class ApiService {
     } catch (e) {
       return { logs: [] };
     }
+  }
+
+  // =========================================================================
+  // CUSTOM DOMAIN & MULTI-TENANT BRANDING API
+  // =========================================================================
+
+  static async getDomains(): Promise<{ domains: any[] }> {
+    return await this.request<{ domains: any[] }>('/domains');
+  }
+
+  static async searchCloudflareZones(query = ''): Promise<{ zones: any[] }> {
+    return await this.request<{ zones: any[] }>(`/domains/search-cloudflare?query=${encodeURIComponent(query)}`);
+  }
+
+  static async connectCloudflareDomain(domain: string, cfZoneId?: string): Promise<any> {
+    return await this.request<any>('/domains/connect-cloudflare', {
+      method: 'POST',
+      body: JSON.stringify({ domain, cfZoneId }),
+    });
+  }
+
+  static async provisionSubdomain(subdomain: string): Promise<any> {
+    return await this.request<any>('/domains/provision-subdomain', {
+      method: 'POST',
+      body: JSON.stringify({ subdomain }),
+    });
+  }
+
+  static async buyDomain(domain: string, years = 1): Promise<any> {
+    return await this.request<any>('/domains/buy-domain', {
+      method: 'POST',
+      body: JSON.stringify({ domain, years }),
+    });
+  }
+
+  static async addExternalDomain(domain: string): Promise<any> {
+    return await this.request<any>('/domains/external', {
+      method: 'POST',
+      body: JSON.stringify({ domain }),
+    });
+  }
+
+  static async verifyExternalDomain(domainId: string): Promise<any> {
+    return await this.request<any>(`/domains/${domainId}/verify`, {
+      method: 'POST',
+    });
+  }
+
+  static async removeDomain(domainId: string): Promise<any> {
+    return await this.request<any>(`/domains/${domainId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  static async resolveDomainTenant(host?: string): Promise<{ matched: boolean; isDefaultHost?: boolean; domain?: string; organization: any | null }> {
+    const targetHost = host || (typeof window !== 'undefined' ? window.location.hostname : '');
+    return await this.request<any>(`/domains/resolve?host=${encodeURIComponent(targetHost)}`);
   }
 }
