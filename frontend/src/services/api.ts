@@ -96,8 +96,17 @@ export class ApiService {
           userObj = { ...userObj, ...meRes.user };
         }
       } catch (e: any) {
-        if (e.message && (e.message.includes('Access Denied') || e.message.includes('denied') || e.message.includes('Cross-tenant'))) {
+        if (
+          e.message &&
+          (e.message.includes('Access Denied') ||
+            e.message.includes('denied') ||
+            e.message.includes('Cross-tenant') ||
+            e.message.includes('Invalid') ||
+            e.message.includes('expired') ||
+            e.message.includes('Authentication required'))
+        ) {
           localStorage.removeItem('vtx_token');
+          localStorage.removeItem('vtx_user');
           await supabase.auth.signOut().catch(() => {});
           throw e;
         }
@@ -297,8 +306,17 @@ export class ApiService {
           userObj = { ...userObj, ...meRes.user };
         }
       } catch (e: any) {
-        if (e.message && (e.message.includes('Access Denied') || e.message.includes('denied') || e.message.includes('Cross-tenant'))) {
+        if (
+          e.message &&
+          (e.message.includes('Access Denied') ||
+            e.message.includes('denied') ||
+            e.message.includes('Cross-tenant') ||
+            e.message.includes('Invalid') ||
+            e.message.includes('expired') ||
+            e.message.includes('Authentication required'))
+        ) {
           localStorage.removeItem('vtx_token');
+          localStorage.removeItem('vtx_user');
           await supabase.auth.signOut().catch(() => {});
           throw e;
         }
