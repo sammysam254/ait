@@ -3,6 +3,7 @@
   publish = "dist"
   command = "npm run build"
 
+# ─── SPA ROUTING ──────────────────────────────────────────────────────────────
 [[redirects]]
   from = "/*"
   to = "/index.html"
@@ -15,3 +16,44 @@
   VITE_WS_HOST = "api.vertext.online"
   SECRETS_SCAN_ENABLED = "false"
   SECRETS_SCAN_OMIT_KEYS = "PORT,NODE_ENV,CLOUDFLARE_SUBDOMAIN,CLOUDFLARE_DOMAIN,FRONTEND_URL,BACKEND_URL,SUPABASE_ANON_KEY,SUPABASE_URL"
+
+# ─── SECURITY HEADERS ─────────────────────────────────────────────────────────
+[[headers]]
+  for = "/*"
+  [headers.values]
+    # Prevent clickjacking
+    X-Frame-Options = "DENY"
+    # Prevent MIME-type sniffing
+    X-Content-Type-Options = "nosniff"
+    # XSS protection for older browsers
+    X-XSS-Protection = "1; mode=block"
+    # Referrer info only sent on same-origin
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    # Restrict browser features
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=()"
+    # Force HTTPS for 1 year
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains; preload"
+    # Content Security Policy — allow our API, WebSockets, Google Fonts, Cloudflare
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://js.paystack.co https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://api.vertext.online wss://api.vertext.online https://*.vertext.online wss://*.vertext.online https://api.paystack.co https://fonts.googleapis.com; media-src 'self' blob:; frame-src 'none'; object-src 'none'; base-uri 'self';"
+
+# ─── CACHE STATIC ASSETS ──────────────────────────────────────────────────────
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.css"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# HTML: no cache (always fresh for SPA routing)
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

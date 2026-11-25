@@ -21,19 +21,34 @@ declare global {
 
 export function authenticate(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : req.query.token as string;
+  // Only accept Bearer header token — never from query string (prevents token leakage in logs/referrers)
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
 
   if (!token) {
     return res.status(401).json({ error: 'Authentication required. No token provided.' });
   }
 
+  // Sanitise token length to prevent DoS via oversized strings
+  if (token.length > 2048) {
+    return res.status(401).json({ error: 'Invalid token.' });
+  }
+
   try {
     let decoded: any;
     try {
+      // Primary: verify signature + expiry
       decoded = jwt.verify(token, config.jwtSecret) as any;
-    } catch (e) {
-      // Decode Supabase access token
-      decoded = jwt.decode(token) as any;
+    } catch (e: any) {
+      // Only allow unsigned decode for Supabase social-auth tokens which use their own secret.
+      // But NEVER grant admin role from an unverified token.
+      if (e.name === 'JsonWebTokenError' || e.name === 'NotBeforeError') {
+        // Completely reject — do not fall back to decode
+        return res.status(401).json({ error: 'Invalid token signature.' });
+      }
+      if (e.name === 'TokenExpiredError') {
+        return res.status(401).json({ error: 'Token expired. Please log in again.' });
+      }
+      throw e;
     }
 
     if (!decoded) {
