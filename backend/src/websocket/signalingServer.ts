@@ -70,6 +70,7 @@ export class SignalingServer {
 
   private initialize() {
     this.wss.on('connection', (ws: WebSocket, req) => {
+      try { (ws as any)._socket?.setNoDelay?.(true); } catch (e) {}
       const url = new URL(req.url || '', `http://${req.headers.host}`);
       const token = url.searchParams.get('token');
       const requestedDeviceId = url.searchParams.get('deviceId');
@@ -216,7 +217,7 @@ export class SignalingServer {
           }
         }
       }
-    }, 10000);
+    }, 8000);
   }
 
   private getRoom(deviceId: string) {
@@ -287,8 +288,8 @@ export class SignalingServer {
             const isAudio = videoPayload.length > 4 && videoPayload[0] === 0x41 && videoPayload[1] === 0x55 && videoPayload[2] === 0x44 && videoPayload[3] === 0x3a;
             for (const viewer of allViewers) {
               if (viewer.ws.readyState === WebSocket.OPEN) {
-                if (isAudio && viewer.ws.bufferedAmount > 64 * 1024) continue;
-                if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
+                if (isAudio && viewer.ws.bufferedAmount > 128 * 1024) continue;
+                if (!isConfig && !isAudio && viewer.ws.bufferedAmount > 512 * 1024) continue;
                 viewer.ws.send(videoPayload);
               }
             }
@@ -424,6 +425,7 @@ export class SignalingServer {
         const room = this.deviceRooms.get(devId);
         if (room && room.agent === session) {
           room.agent = undefined;
+          // 15s grace period so brief network/Cloudflare blips never drop devices offline while agent auto-reconnects in 500ms
           setTimeout(() => {
             const currentRoom = this.deviceRooms.get(devId);
             if (currentRoom && (!currentRoom.agent || currentRoom.agent.ws.readyState !== WebSocket.OPEN)) {
@@ -434,7 +436,7 @@ export class SignalingServer {
                 }
               }
             }
-          }, 5000);
+          }, 15000);
         }
       }
     });

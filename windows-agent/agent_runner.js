@@ -821,11 +821,11 @@ function scheduleReconnect() {
   if (isReconnecting) return;
   isReconnecting = true;
   if (reconnectTimer) clearTimeout(reconnectTimer);
-  console.log('[StreamBridge] ⚡ Immediate auto-recovery initiated. Reconnecting in 1.5s...');
+  console.log('[StreamBridge] ⚡ Immediate auto-recovery initiated. Reconnecting in 500ms...');
   reconnectTimer = setTimeout(() => {
     isReconnecting = false;
     connectWebSocket();
-  }, 1500);
+  }, 500);
 }
 
 function connectWebSocket() {
@@ -852,8 +852,9 @@ function connectWebSocket() {
       console.log('[StreamBridge] 🟢 Connected to Cloud Signaling Gateway successfully.');
       isReconnecting = false;
       lastActivityTime = Date.now();
+      try { ws._socket?.setNoDelay?.(true); } catch (e) {}
 
-      // Active bidirectional RFC 6455 transport ping every 10s: keeps Cloudflare and Nginx reverse proxies permanently alive
+      // Active bidirectional RFC 6455 transport ping every 8s: keeps Cloudflare and Nginx reverse proxies permanently alive
       if (pingInterval) clearInterval(pingInterval);
       pingInterval = setInterval(() => {
         if (ws && ws.readyState === 1) {
@@ -865,7 +866,7 @@ function connectWebSocket() {
             }
           } catch (e) {}
         }
-      }, 10000);
+      }, 8000);
 
       // Connection watchdog: if no activity / pong in 30s, force instant clean reconnect
       if (watchdogTimer) clearInterval(watchdogTimer);
@@ -1438,7 +1439,7 @@ function startStream(deviceId, targetSerial) {
 
       server.on('error', (err) => console.error(`[StreamBridge] Video server error for ${serial}:`, err.message));
 
-      // Scrcpy: video + control ONLY — zero audio risk
+      // Scrcpy: video + control ONLY — zero audio risk, zero B-frames for instant low-latency decode
       scrcpyProc = spawn(adbPath, [
         '-s', serial, 'shell',
         `CLASSPATH=${remoteJarPath}`,
@@ -1447,13 +1448,13 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'max_size=1280',
-        'video_bit_rate=2000000',
+        'max_size=1080',
+        'video_bit_rate=1600000',
         'max_fps=60',
         'stay_awake=true',
         'control=true',
         'audio=false',
-        'video_codec_options=i-frame-interval:int=1',
+        'video_codec_options=i-frame-interval:int=1,max-bframes:int=0,priority:int=0',
         'downsize_on_error=true',
       ]);
 

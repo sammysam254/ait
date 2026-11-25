@@ -635,7 +635,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
       streamPoller = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           const now = performance.now();
-          if (now - lastFrameTimeRef.current > 2500) {
+          if (now - lastFrameTimeRef.current > 1200) {
             if (videoRef.current && videoRef.current.paused) {
               videoRef.current.play().catch(() => {});
             }
@@ -643,7 +643,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
             try { ws.send(JSON.stringify({ type: 'request-keyframe', deviceId: reqId })); } catch (e) {}
           }
         }
-      }, 2000);
+      }, 1200);
     };
 
     const lastFrameTimeRef = { current: performance.now() };
@@ -697,7 +697,7 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
                 if (isMountedRef.current) {
                   connectStream(serverWsUrl, serverToken);
                 }
-              }, 3000);
+              }, 1000);
             }
           }
         } catch (e) {}
@@ -789,22 +789,27 @@ export const DeviceViewerPage: React.FC<DeviceViewerPageProps> = ({
               videoRef.current.play().catch(() => {});
             }
 
-            // Zero-Lag Real-Time Live-Edge Snapping: Guarantees 0ms perceptual lag
+            // Zero-Lag Real-Time Live-Edge Snapping: Guarantees smooth, lag-free playback
             const nowTs = performance.now();
-            if (nowTs - lastSyncCheckRef.current >= 100) {
+            if (nowTs - lastSyncCheckRef.current >= 50) {
               lastSyncCheckRef.current = nowTs;
               if (videoRef.current && videoRef.current.buffered.length > 0) {
                 const buf = videoRef.current.buffered;
                 const liveEdge = buf.end(buf.length - 1);
                 const drift = liveEdge - videoRef.current.currentTime;
 
-                // If buffer is more than 80ms ahead of current playback, jump straight to live edge
-                if (drift > 0.08) {
-                  videoRef.current.currentTime = Math.max(0, liveEdge - 0.01);
+                if (drift > 0.12) {
+                  videoRef.current.playbackRate = 1.0;
+                  videoRef.current.currentTime = Math.max(0, liveEdge - 0.005);
+                } else if (drift > 0.035) {
+                  // Smooth micro-catchup without visible frame jump
+                  videoRef.current.playbackRate = 1.08;
+                } else if (videoRef.current.playbackRate !== 1.0) {
+                  videoRef.current.playbackRate = 1.0;
                 }
 
-                // If severe drift accumulates (> 0.7s, e.g. from tab switch or mobile freeze), purge buffer and resync
-                if (drift > 0.7) {
+                // If severe drift accumulates (> 0.6s, e.g. from tab switch or mobile freeze), purge buffer and resync
+                if (drift > 0.6) {
                   if (jmuxerRef.current && typeof jmuxerRef.current.clearBuffer === 'function') {
                     try { jmuxerRef.current.clearBuffer(); } catch (e) {}
                   }
