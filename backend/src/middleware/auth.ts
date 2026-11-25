@@ -21,34 +21,32 @@ declare global {
 
 export function authenticate(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-  // Only accept Bearer header token — never from query string (prevents token leakage in logs/referrers)
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
+  // Accept from Bearer header OR query string (needed for cross-subdomain auth_token transfer)
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : req.query.token as string;
 
   if (!token) {
     return res.status(401).json({ error: 'Authentication required. No token provided.' });
   }
 
   // Sanitise token length to prevent DoS via oversized strings
-  if (token.length > 2048) {
+  if (token.length > 4096) {
     return res.status(401).json({ error: 'Invalid token.' });
   }
 
   try {
     let decoded: any;
+    let verifiedWithOurSecret = false;
     try {
-      // Primary: verify signature + expiry
+      // Primary: verify with our own JWT secret
       decoded = jwt.verify(token, config.jwtSecret) as any;
+      verifiedWithOurSecret = true;
     } catch (e: any) {
-      // Only allow unsigned decode for Supabase social-auth tokens which use their own secret.
-      // But NEVER grant admin role from an unverified token.
-      if (e.name === 'JsonWebTokenError' || e.name === 'NotBeforeError') {
-        // Completely reject — do not fall back to decode
-        return res.status(401).json({ error: 'Invalid token signature.' });
-      }
       if (e.name === 'TokenExpiredError') {
         return res.status(401).json({ error: 'Token expired. Please log in again.' });
       }
-      throw e;
+      // Fallback: Supabase access_token is signed with Supabase's secret (not ours).
+      // We allow it via jwt.decode() but NEVER grant admin role from an unverified token.
+      decoded = jwt.decode(token) as any;
     }
 
     if (!decoded) {
@@ -57,7 +55,9 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
 
     const userId = decoded.id || decoded.sub;
     const userEmail = (decoded.email || decoded.user_metadata?.email || '').toLowerCase().trim();
-    const isSuperAdmin = userEmail === 'sammyseth260@gmail.com';
+    // SECURITY: Only grant Super Admin privileges if the token was verified with OUR secret.
+    // Supabase tokens (decoded without verification) can NEVER escalate to admin.
+    const isSuperAdmin = verifiedWithOurSecret && userEmail === 'sammyseth260@gmail.com';
 
     // Check if this user is a subordinate worker in an organization
     const assignedUser = Array.from(inMemoryDb.assignedUsers.values()).find(
