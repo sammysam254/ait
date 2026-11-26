@@ -1439,7 +1439,7 @@ function startStream(deviceId, targetSerial) {
 
       server.on('error', (err) => console.error(`[StreamBridge] Video server error for ${serial}:`, err.message));
 
-      // Scrcpy: video + control ONLY — zero audio risk, zero B-frames for instant low-latency decode
+      // Scrcpy: video + control ONLY — zero audio risk, macroblock-aligned 1024px & safe codec options for Samsung/MediaTek Android 11
       scrcpyProc = spawn(adbPath, [
         '-s', serial, 'shell',
         `CLASSPATH=${remoteJarPath}`,
@@ -1448,13 +1448,13 @@ function startStream(deviceId, targetSerial) {
         `scid=${scid}`,
         'log_level=info',
         'cleanup=false',
-        'max_size=1080',
+        'max_size=1024',
         'video_bit_rate=1600000',
         'max_fps=60',
         'stay_awake=true',
         'control=true',
         'audio=false',
-        'video_codec_options=i-frame-interval:int=1,max-bframes:int=0,priority:int=0',
+        'video_codec_options=i-frame-interval:int=1',
         'downsize_on_error=true',
       ]);
 
