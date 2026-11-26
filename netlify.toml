@@ -33,8 +33,8 @@
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
     # Force HTTPS for 1 year
     Strict-Transport-Security = "max-age=31536000; includeSubDomains; preload"
-    # Content Security Policy — allow our API, WebSockets, Supabase, Paystack checkout iframe, Google Fonts, Cloudflare
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.paystack.co https://*.paystack.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://*.paystack.co https://*.paystack.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://api.vertext.online wss://api.vertext.online https://*.vertext.online wss://*.vertext.online https://*.paystack.co https://*.paystack.com https://*.supabase.co wss://*.supabase.co https://fonts.googleapis.com; media-src 'self' blob:; frame-src 'self' https://*.paystack.co https://*.paystack.com; child-src 'self' https://*.paystack.co https://*.paystack.com; object-src 'none'; base-uri 'self';"
+    # Content Security Policy — allow our API, WebSockets, Supabase, Paystack checkout iframe, AudioWorklet blob:, Google Fonts, Cloudflare
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://*.paystack.co https://*.paystack.com https://static.cloudflareinsights.com; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://*.paystack.co https://*.paystack.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://api.vertext.online wss://api.vertext.online https://*.vertext.online wss://*.vertext.online https://*.paystack.co https://*.paystack.com https://*.supabase.co wss://*.supabase.co https://fonts.googleapis.com; media-src 'self' blob:; frame-src 'self' https://*.paystack.co https://*.paystack.com; child-src 'self' https://*.paystack.co https://*.paystack.com; object-src 'none'; base-uri 'self';"
 
 # ─── CACHE STATIC ASSETS ──────────────────────────────────────────────────────
 [[headers]]
