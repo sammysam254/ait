@@ -7,8 +7,27 @@ export class ApiService {
     return localStorage.getItem('vtx_token');
   }
 
-  private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-    const token = this.getToken();
+  private static async getFreshToken(forceRefresh = false): Promise<string | null> {
+    try {
+      if (forceRefresh) {
+        const { data } = await supabase.auth.refreshSession();
+        if (data?.session?.access_token) {
+          localStorage.setItem('vtx_token', data.session.access_token);
+          return data.session.access_token;
+        }
+      } else {
+        const { data } = await supabase.auth.getSession();
+        if (data?.session?.access_token) {
+          localStorage.setItem('vtx_token', data.session.access_token);
+          return data.session.access_token;
+        }
+      }
+    } catch (e) {}
+    return this.getToken();
+  }
+
+  private static async request<T>(endpoint: string, options: RequestInit = {}, retried = false): Promise<T> {
+    const token = await this.getFreshToken(false);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       ...(options.headers as Record<string, string>),
@@ -27,6 +46,13 @@ export class ApiService {
         ...options,
         headers,
       });
+
+      if (res.status === 401 && !retried) {
+        const refreshedToken = await this.getFreshToken(true);
+        if (refreshedToken && refreshedToken !== token) {
+          return this.request<T>(endpoint, options, true);
+        }
+      }
 
       const data = await res.json().catch(() => ({}));
 
