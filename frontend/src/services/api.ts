@@ -751,4 +751,42 @@ export class ApiService {
     const targetHost = host || (typeof window !== 'undefined' ? window.location.hostname : '');
     return await this.request<any>(`/domains/resolve?host=${encodeURIComponent(targetHost)}`);
   }
+
+  static async changePassword(email: string, currentPassword: string, newPassword: string): Promise<void> {
+    const cleanEmail = email.toLowerCase().trim();
+    if (!cleanEmail) {
+      throw new Error('Account email not found. Please sign in again.');
+    }
+    if (!currentPassword) {
+      throw new Error('Please enter your current password.');
+    }
+    if (!newPassword || newPassword.length < 8) {
+      throw new Error('New password must be at least 8 characters long.');
+    }
+
+    // Re-authenticate with current password first to verify ownership
+    const { error: signInErr } = await supabase.auth.signInWithPassword({
+      email: cleanEmail,
+      password: currentPassword,
+    });
+    if (signInErr) {
+      throw new Error('Current password is incorrect.');
+    }
+
+    // Update password in Supabase Auth
+    const { data, error: updateErr } = await supabase.auth.updateUser({
+      password: newPassword,
+    });
+    if (updateErr) {
+      throw new Error(updateErr.message || 'Failed to update password.');
+    }
+
+    // Refresh local session token if available
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (sessionData?.session?.access_token) {
+      localStorage.setItem('vtx_token', sessionData.session.access_token);
+    } else if (!data?.user) {
+      throw new Error('Password updated, please sign in again.');
+    }
+  }
 }

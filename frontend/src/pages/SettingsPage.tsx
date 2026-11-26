@@ -20,6 +20,9 @@ import {
   ArrowRight,
   Loader2,
   Edit2,
+  KeyRound,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { ApiService } from '../services/api';
@@ -37,6 +40,16 @@ export const SettingsPage: React.FC = () => {
   const [editingSubdomain, setEditingSubdomain] = useState<any | null>(null);
   const [editSubdomainPrefix, setEditSubdomainPrefix] = useState('');
   const [updatingSubdomain, setUpdatingSubdomain] = useState(false);
+
+  // Change Password State
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showCurrentPwd, setShowCurrentPwd] = useState(false);
+  const [showNewPwd, setShowNewPwd] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
 
   // Domains State
   const [domains, setDomains] = useState<any[]>([]);
@@ -1012,50 +1025,185 @@ export const SettingsPage: React.FC = () => {
 
       {/* TAB 2: PROFILE */}
       {activeTab === 'profile' && (
-        <div className="rounded-2xl bg-gray-900/70 border border-gray-800 p-6 space-y-6 shadow-xl">
-          <div className="space-y-4">
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
-              <User className="h-4 w-4 text-indigo-400" />
-              <span>Profile Information</span>
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-              <div>
-                <label className="text-gray-400 block mb-1 font-semibold">Full Name</label>
-                <input
-                  type="text"
-                  readOnly
-                  value={user?.fullName || ''}
-                  className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-200"
-                />
-              </div>
-              <div>
-                <label className="text-gray-400 block mb-1 font-semibold">Email Address</label>
-                <input
-                  type="email"
-                  readOnly
-                  value={user?.email || ''}
-                  className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-200"
-                />
-              </div>
-              <div>
-                <label className="text-gray-400 block mb-1 font-semibold">Account Role</label>
-                <input
-                  type="text"
-                  readOnly
-                  value={user?.role || ''}
-                  className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-200 uppercase font-mono text-[11px]"
-                />
-              </div>
-              <div>
-                <label className="text-gray-400 block mb-1 font-semibold">Tenant Organization ID</label>
-                <input
-                  type="text"
-                  readOnly
-                  value={user?.organizationId || ''}
-                  className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-400 font-mono text-[11px]"
-                />
+        <div className="space-y-6">
+          <div className="rounded-2xl bg-gray-900/70 border border-gray-800 p-6 space-y-6 shadow-xl">
+            <div className="space-y-4">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <User className="h-4 w-4 text-indigo-400" />
+                <span>Profile Information</span>
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div>
+                  <label className="text-gray-400 block mb-1 font-semibold">Full Name</label>
+                  <input
+                    type="text"
+                    readOnly
+                    value={user?.fullName || ''}
+                    className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-200"
+                  />
+                </div>
+                <div>
+                  <label className="text-gray-400 block mb-1 font-semibold">Email Address</label>
+                  <input
+                    type="email"
+                    readOnly
+                    value={user?.email || ''}
+                    className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-200"
+                  />
+                </div>
+                <div>
+                  <label className="text-gray-400 block mb-1 font-semibold">Account Role</label>
+                  <input
+                    type="text"
+                    readOnly
+                    value={user?.role || ''}
+                    className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-200 uppercase font-mono text-[11px]"
+                  />
+                </div>
+                <div>
+                  <label className="text-gray-400 block mb-1 font-semibold">Tenant Organization ID</label>
+                  <input
+                    type="text"
+                    readOnly
+                    value={user?.organizationId || ''}
+                    className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-400 font-mono text-[11px]"
+                  />
+                </div>
               </div>
             </div>
+          </div>
+
+          {/* Change Password Card */}
+          <div className="rounded-2xl bg-gray-900/70 border border-gray-800 p-6 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <KeyRound className="h-4 w-4 text-indigo-400" />
+                  <span>Change Account Password</span>
+                </h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Update your login password for <span className="text-gray-200 font-mono">{user?.email}</span>
+                </p>
+              </div>
+            </div>
+
+            {passwordError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-xs flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>{passwordError}</span>
+              </div>
+            )}
+            {passwordSuccess && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 text-xs flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <span>{passwordSuccess}</span>
+              </div>
+            )}
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setPasswordError(null);
+                setPasswordSuccess(null);
+                if (newPassword.length < 8) {
+                  setPasswordError('New password must be at least 8 characters.');
+                  return;
+                }
+                if (newPassword !== confirmPassword) {
+                  setPasswordError('New password and confirmation do not match.');
+                  return;
+                }
+                setChangingPassword(true);
+                try {
+                  await ApiService.changePassword(user?.email || '', currentPassword, newPassword);
+                  setPasswordSuccess('Password updated successfully! Use your new password next time you sign in.');
+                  setCurrentPassword('');
+                  setNewPassword('');
+                  setConfirmPassword('');
+                } catch (err: any) {
+                  setPasswordError(err.message || 'Failed to update password.');
+                } finally {
+                  setChangingPassword(false);
+                }
+              }}
+              className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs"
+            >
+              <div>
+                <label className="text-gray-400 block mb-1 font-semibold">Current Password</label>
+                <div className="relative">
+                  <input
+                    type={showCurrentPwd ? 'text' : 'password'}
+                    required
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    placeholder="Enter current password"
+                    className="w-full px-3 py-2 pr-9 rounded-lg bg-gray-950 border border-gray-800 text-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPwd((v) => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+                  >
+                    {showCurrentPwd ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-gray-400 block mb-1 font-semibold">New Password</label>
+                <div className="relative">
+                  <input
+                    type={showNewPwd ? 'text' : 'password'}
+                    required
+                    minLength={8}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Min. 8 characters"
+                    className="w-full px-3 py-2 pr-9 rounded-lg bg-gray-950 border border-gray-800 text-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPwd((v) => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+                  >
+                    {showNewPwd ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-gray-400 block mb-1 font-semibold">Confirm New Password</label>
+                <input
+                  type={showNewPwd ? 'text' : 'password'}
+                  required
+                  minLength={8}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Re-enter new password"
+                  className="w-full px-3 py-2 rounded-lg bg-gray-950 border border-gray-800 text-gray-200 focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="md:col-span-3 flex justify-end pt-1">
+                <button
+                  type="submit"
+                  disabled={changingPassword}
+                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center gap-2 transition disabled:opacity-50"
+                >
+                  {changingPassword ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Updating Password...</span>
+                    </>
+                  ) : (
+                    <>
+                      <KeyRound className="h-3.5 w-3.5" />
+                      <span>Update Password</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -1089,6 +1237,20 @@ export const SettingsPage: React.FC = () => {
                 <span>Device Sharing PIN Encryption</span>
                 <span className="text-emerald-400 font-semibold">bcrypt (10 rounds)</span>
               </div>
+            </div>
+            <div className="flex items-center justify-between p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/30">
+              <div>
+                <p className="text-xs font-bold text-white">Account Password</p>
+                <p className="text-[11px] text-gray-400">Change your sign-in password anytime from Profile & Organization.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('profile')}
+                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition"
+              >
+                <KeyRound className="h-3.5 w-3.5" />
+                <span>Change Password</span>
+              </button>
             </div>
           </div>
         </div>
